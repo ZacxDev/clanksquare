@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/ZacxDev/clankmail v0.0.0-20261101080649-c65f52f77152
-	github.com/ZacxDev/clankmail/go/hub v0.0.0-20261101205530-a4bd990bf158
+	github.com/ZacxDev/clankmail/go/hub v0.0.0-20261101211530-c0161a38f989
 	github.com/ZacxDev/clanksquare v0.0.0
 )
 

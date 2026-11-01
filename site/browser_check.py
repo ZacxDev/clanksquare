@@ -12,6 +12,7 @@ them. Prints one "ok"/"not ok" line per check; exits 1 on any failure.
 import glob
 import os
 import sys
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -29,12 +30,23 @@ def check(cond, what):
         failures += 1
 
 
-def wait_for(page, js):
-    try:
-        page.wait_for_function(js, timeout=10000)
-        return True
-    except Exception:
-        return False
+def wait_for(page, js, timeout=10.0):
+    # Poll from Python. page.wait_for_function re-evaluates a string predicate
+    # INSIDE the page, which the page's CSP (no 'unsafe-eval') refuses, so it
+    # only ever passed when the first check was already true: green against a
+    # fast local stub, always red against the real hub. page.evaluate runs
+    # through the DevTools protocol, which the page's CSP does not govern.
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if page.evaluate(js):
+                return True
+        except Exception as e:
+            print("# wait_for: evaluate failed: %s" % e)
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 ERRORED = "document.getElementById('channels-status').classList.contains('error')"

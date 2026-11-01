@@ -54,6 +54,14 @@ type fakeHub struct {
 	onStore func(obj *clankmail.Object)
 	// postSubmits counts every msg submission received, stored or not.
 	postSubmits int
+	// storedAnswers: a resubmission of a stored id is answered with the next
+	// of these instead of 200. code "" means a bare text body (a proxy's).
+	storedAnswers []storedAnswer
+}
+
+type storedAnswer struct {
+	status int
+	code   string
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -106,6 +114,16 @@ func (h *fakeHub) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		h.postSubmits++
 	}
 	if _, ok := h.objects[obj.ID]; ok {
+		if len(h.storedAnswers) > 0 {
+			a := h.storedAnswers[0]
+			h.storedAnswers = h.storedAnswers[1:]
+			if a.code == "" {
+				http.Error(w, "404 page not found", a.status)
+			} else {
+				hubErr(w, a.status, a.code, "injected")
+			}
+			return
+		}
 		if h.down {
 			hubErr(w, 502, "", "bad gateway")
 			return

@@ -226,15 +226,30 @@ type outcome int
 
 const (
 	confirmed outcome = iota // the hub holds it (200 with its id)
-	refused                  // a definitive refusal: the hub does not hold it
-	unknown                  // no answer, 5xx, 429 or a wrong id: it may be stored
+	refused                  // one of notStoredCodes: the hub does not hold it
+	unknown                  // anything else: it may be stored
 )
 
-// send submits token and classifies the answer. §5 checks "id already
-// stored" before anything else, so resending a stored token answers 200,
-// and any other 4xx means the token is not stored. A 429 is unknown (the
-// per-address limit is charged before that check) and stops submitting for
-// the run, whether or not it carries E_RATE (a relay's 429 does not).
+// notStoredCodes are the only answers that settle a token as NOT stored, so
+// its pending record may be dropped (and the item posted again, once). Each
+// is decided by the hub after its "id already stored" check (SPEC §5; go/hub
+// submit), so a stored token can never get one, and none can turn into a
+// success for these exact bytes later:
+//
+//   - E_STALE: ts is outside ±300 s; our tokens only grow older.
+//   - E_NOT_FOUND: the channel the post names does not exist (§7.2).
+//
+// Everything else is unknown: a 4xx without a ClankMail code (a proxy's
+// "404 page not found"), the §4 codes (a truncated or mangled body fails
+// verification before the stored-id check), E_FORBIDDEN and E_REVOKED
+// (left out on purpose: they fail loud instead; a resend after five minutes
+// turns into E_STALE anyway), any 5xx, 429 or network error.
+var notStoredCodes = map[string]int{"E_STALE": http.StatusBadRequest, "E_NOT_FOUND": http.StatusNotFound}
+
+// send submits token and classifies the answer: confirmed (200 with the
+// token's id), refused (notStoredCodes) or unknown. A 429 also stops
+// submitting for the run, whether or not it carries E_RATE (a relay's 429
+// does not).
 func (r *runner) send(ctx context.Context, what, token string) (outcome, error) {
 	want := tokenID(token)
 	id, err := r.hub.submit(ctx, token)
@@ -253,7 +268,7 @@ func (r *runner) send(ctx context.Context, what, token string) (outcome, error) 
 			r.res.RateLimited = true
 			r.stopped = true
 			return unknown, err
-		case he.Status >= 400 && he.Status < 500:
+		case he.Code != "" && notStoredCodes[he.Code] == he.Status:
 			return refused, err
 		}
 	}

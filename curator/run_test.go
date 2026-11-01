@@ -28,6 +28,7 @@ type world struct {
 	cfg   *Config
 	now   time.Time
 	out   bytes.Buffer
+	ctx   context.Context // nil: context.Background()
 }
 
 func newWorld(t *testing.T) *world {
@@ -61,7 +62,11 @@ func (w *world) run(mods ...func(*Options)) *Result {
 	for _, m := range mods {
 		m(&o)
 	}
-	res := Run(context.Background(), o)
+	ctx := w.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res := Run(ctx, o)
 	w.t.Logf("run output:\n%s", w.out.String())
 	return res
 }
@@ -216,6 +221,20 @@ func TestSelectGuidFallback(t *testing.T) {
 		{GUID: "urn:uuid:1234", Date: at(2)},           // otherwise the guid itself
 		{Date: at(3)},                                  // neither: unusable
 	}}
+	// Guids whose cleaned-up form is a URL although the raw one is not.
+	odd := &Feed{Items: []Item{
+		{GUID: "https://x.example/del\x7f", Date: at(1)},
+		{GUID: "https://x.example/" + strings.Repeat("a", maxLink), Date: at(1)},
+	}}
+	oddGot, _ := sel(t, Channel{MaxPerRun: 10}, nil, odd)
+	if len(oddGot) != 2 {
+		t.Fatalf("odd guids selected %d", len(oddGot))
+	}
+	for _, c := range oddGot {
+		if keyFromLine(c.line) != c.key {
+			t.Errorf("keyFromLine(%.40q) = %.50q, want %.50q: a rebuild would not recognise this post", c.line, keyFromLine(c.line), c.key)
+		}
+	}
 	got, st := sel(t, Channel{MaxPerRun: 10}, nil, f)
 	if !reflect.DeepEqual(lines(got), []string{"urn:uuid:1234", "https://x.example/perma"}) {
 		t.Fatalf("selected %v", lines(got))
@@ -623,29 +642,6 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRunStatePruned(t *testing.T) {
-	w := newWorld(t)
-	w.feeds.set("/a", atomFeedXML("A"))
-	w.config(5, feed("/a"))
-	w.run()
-	cid := w.hub.slugs["news"]
-	st := &State{Version: 1, Channels: map[string]*ChannelState{cid: {Slug: "news", Seen: map[string]int64{
-		"https://x.example/old":    testNow.Add(-31 * 24 * time.Hour).UnixMilli(),
-		"https://x.example/recent": testNow.Add(-29 * 24 * time.Hour).UnixMilli(),
-	}}}}
-	st.Save(w.statePath())
-	w.feeds.set("/a", atomFeedXML("A", entry{id: "1", link: "https://x.example/new", title: "n", date: ago(1)}))
-	w.run()
-	got, _ := LoadState(w.statePath())
-	seen := got.Channels[cid].Seen
-	if _, ok := seen["https://x.example/old"]; ok {
-		t.Error("an entry older than 30 days was kept")
-	}
-	if _, ok := seen["https://x.example/recent"]; !ok {
-		t.Error("a 29-day-old entry was pruned")
-	}
-}
-
 func TestRunPersistsRebuiltState(t *testing.T) {
 	// A run that rebuilds from the log but posts nothing still writes the
 	// state, so the following run does not read the whole log again.
@@ -671,8 +667,7 @@ func TestRunPersistsRebuiltState(t *testing.T) {
 }
 
 func TestRunStateWriteFailure(t *testing.T) {
-	// If the state cannot be written after a post, submitting stops, the run
-	// fails, and no stale state file is left for the next run to trust.
+	// If the state cannot be written, submitting stops and the run fails.
 	w := newWorld(t)
 	w.feeds.set("/a", atomFeedXML("A",
 		entry{id: "1", link: "https://x.example/1", title: "1", date: ago(2)},
@@ -681,7 +676,9 @@ func TestRunStateWriteFailure(t *testing.T) {
 	w.config(5, feed("/a"))
 	bad := filepath.Join(w.dir, "missing-dir", "state.json")
 	res := w.run(func(o *Options) { o.StatePath = bad })
-	if res.ExitCode() == 0 || len(w.hub.posts("news")) != 1 {
-		t.Fatalf("exit %d, %d posts: want failure after the first post", res.ExitCode(), len(w.hub.posts("news")))
+	// The pending record is written before each submit, so an unwritable
+	// state means nothing is posted at all.
+	if res.ExitCode() == 0 || len(w.hub.posts("news")) != 0 {
+		t.Fatalf("exit %d, %d posts: want failure before any post", res.ExitCode(), len(w.hub.posts("news")))
 	}
 }

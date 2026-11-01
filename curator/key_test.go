@@ -67,18 +67,18 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("defaults not applied: %+v", c)
 	}
 	bad := map[string]func(*Config){
-		"no hub":        func(c *Config) { c.Hub = "" },
-		"bad hub":       func(c *Config) { c.Hub = "Hub_Example" },
-		"no hub url":    func(c *Config) { c.HubURL = "" },
-		"bad handle":    func(c *Config) { c.Handle = "X" },
-		"bad slug":      func(c *Config) { c.Channels[0].Slug = "#news" },
-		"long title":    func(c *Config) { c.Channels[0].Title = strings.Repeat("t", 81) },
-		"bad tag":       func(c *Config) { c.Channels[0].Tags = []string{"Bad Tag"} },
-		"dup slug":      func(c *Config) { c.Channels = append(c.Channels, c.Channels[0]) },
-		"no feeds":      func(c *Config) { c.Channels[0].Feeds = nil },
-		"feed scheme":   func(c *Config) { c.Channels[0].Feeds[0].URL = "file:///etc/passwd" },
-		"max per run":   func(c *Config) { c.Channels[0].MaxPerRun = 51 },
-		"max age > ttl": func(c *Config) { c.MaxAgeHours = 30 * 24 },
+		"no hub":       func(c *Config) { c.Hub = "" },
+		"bad hub":      func(c *Config) { c.Hub = "Hub_Example" },
+		"no hub url":   func(c *Config) { c.HubURL = "" },
+		"bad handle":   func(c *Config) { c.Handle = "X" },
+		"bad slug":     func(c *Config) { c.Channels[0].Slug = "#news" },
+		"long title":   func(c *Config) { c.Channels[0].Title = strings.Repeat("t", 81) },
+		"bad tag":      func(c *Config) { c.Channels[0].Tags = []string{"Bad Tag"} },
+		"dup slug":     func(c *Config) { c.Channels = append(c.Channels, c.Channels[0]) },
+		"no feeds":     func(c *Config) { c.Channels[0].Feeds = nil },
+		"feed scheme":  func(c *Config) { c.Channels[0].Feeds[0].URL = "file:///etc/passwd" },
+		"max per run":  func(c *Config) { c.Channels[0].MaxPerRun = 51 },
+		"max age > 1y": func(c *Config) { c.MaxAgeHours = 365*24 + 1 },
 	}
 	for name, mut := range bad {
 		c := ok()

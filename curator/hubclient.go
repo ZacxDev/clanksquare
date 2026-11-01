@@ -121,13 +121,14 @@ type logPage struct {
 	Next string `json:"next"`
 }
 
-// logTokens returns every token in a channel's log, reading all pages.
-func (h *hubClient) logTokens(ctx context.Context, channelID string) ([]string, error) {
-	var out []string
+// eachLogPage calls fn with the tokens of each page of a channel's log, in
+// order, until the log ends. Only one page is held at a time: anyone may
+// post to a join: open channel, so the whole log is unbounded.
+func (h *hubClient) eachLogPage(ctx context.Context, channelID string, fn func(tokens []string)) error {
 	after := ""
 	for page := 0; ; page++ {
 		if page > 100_000 {
-			return nil, fmt.Errorf("channel %s log: too many pages", channelID)
+			return fmt.Errorf("channel %s log: too many pages", channelID)
 		}
 		path := fmt.Sprintf("/v1/channels/%s/log?limit=%d", channelID, logPageLimit)
 		if after != "" {
@@ -135,14 +136,16 @@ func (h *hubClient) logTokens(ctx context.Context, channelID string) ([]string, 
 		}
 		var p logPage
 		if err := h.get(ctx, path, &p); err != nil {
-			return nil, err
+			return err
 		}
-		for _, it := range p.Items {
-			out = append(out, it.Token)
+		toks := make([]string, len(p.Items))
+		for i, it := range p.Items {
+			toks[i] = it.Token
 		}
+		fn(toks)
 		// An empty page, or a cursor that did not move, is the end.
 		if len(p.Items) == 0 || p.Next == "" || p.Next == after {
-			return out, nil
+			return nil
 		}
 		after = p.Next
 	}

@@ -17,9 +17,9 @@ const (
 	defaultMaxAgeHours = 48
 	defaultMaxPerRun   = 5
 	maxMaxPerRun       = 50
-	// seenTTL is how long a seen key is remembered. It must exceed every
-	// channel's max age, so an item is too old before it is forgotten.
-	seenTTLHours = 30 * 24
+	// maxMaxAgeHours is a sanity bound on max_age_hours (one year). It is
+	// not tied to how long posted links are remembered: they never expire.
+	maxMaxAgeHours = 365 * 24
 )
 
 // Config is the curator's JSON configuration.
@@ -91,8 +91,8 @@ func (c *Config) Validate() error {
 	if c.MaxAgeHours == 0 {
 		c.MaxAgeHours = defaultMaxAgeHours
 	}
-	if c.MaxAgeHours < 1 || c.MaxAgeHours >= seenTTLHours {
-		return fmt.Errorf("max_age_hours must be 1–%d", seenTTLHours-1)
+	if c.MaxAgeHours < 1 || c.MaxAgeHours > maxMaxAgeHours {
+		return fmt.Errorf("max_age_hours must be 1–%d", maxMaxAgeHours)
 	}
 	_, probe, _ := ed25519.GenerateKey(nil)
 	if c.Hub == "" {
@@ -129,8 +129,8 @@ func (c *Config) Validate() error {
 		if ch.MaxAgeHours == 0 {
 			ch.MaxAgeHours = c.MaxAgeHours
 		}
-		if ch.MaxAgeHours < 1 || ch.MaxAgeHours >= seenTTLHours {
-			return fmt.Errorf("channel %q: max_age_hours must be 1–%d", ch.Slug, seenTTLHours-1)
+		if ch.MaxAgeHours < 1 || ch.MaxAgeHours > maxMaxAgeHours {
+			return fmt.Errorf("channel %q: max_age_hours must be 1–%d", ch.Slug, maxMaxAgeHours)
 		}
 		if len(ch.Feeds) == 0 {
 			return fmt.Errorf("channel %q: no feeds", ch.Slug)

@@ -12,7 +12,14 @@ import (
 //
 // File format (JSON, version 1):
 //
-//	{"version":1,"channels":{"c_…":{"slug":"…","seen":{"<dedupe key>":<first-seen unix ms>}}}}
+//	{"version":1,"channels":{"c_…":{"slug":"…","seen":{"<dedupe key>":<first-seen unix ms>},
+//	                                 "pending":{"<dedupe key>":"<signed token>"}}}}
+//
+// Seen keys are never forgotten. A pending entry is a write-ahead record: it
+// is saved before its token is submitted and replaced by a seen key once the
+// hub confirms it, so a post the hub stored but never confirmed (a lost
+// answer, a crash, SIGTERM) is resolved by resending the same bytes instead
+// of being signed and posted a second time.
 type State struct {
 	Version  int                      `json:"version"`
 	Channels map[string]*ChannelState `json:"channels"`
@@ -21,8 +28,9 @@ type State struct {
 // ChannelState is one channel's seen set, keyed by channel id so a slug that
 // comes to name a different channel never inherits another channel's set.
 type ChannelState struct {
-	Slug string           `json:"slug"`
-	Seen map[string]int64 `json:"seen"`
+	Slug    string            `json:"slug"`
+	Seen    map[string]int64  `json:"seen"`
+	Pending map[string]string `json:"pending,omitempty"`
 }
 
 func newState() *State { return &State{Version: 1, Channels: map[string]*ChannelState{}} }
@@ -49,22 +57,15 @@ func LoadState(path string) (*State, error) {
 		s.Channels = map[string]*ChannelState{}
 	}
 	for id, cs := range s.Channels {
-		if cs == nil || cs.Seen == nil {
+		if cs == nil || cs.Seen == nil && len(cs.Pending) == 0 {
 			delete(s.Channels, id) // rebuilt from the log
+			continue
+		}
+		if cs.Seen == nil {
+			cs.Seen = map[string]int64{}
 		}
 	}
 	return &s, nil
-}
-
-// prune forgets seen keys first seen before cutoff (unix ms).
-func (s *State) prune(cutoff int64) {
-	for _, cs := range s.Channels {
-		for k, at := range cs.Seen {
-			if at < cutoff {
-				delete(cs.Seen, k)
-			}
-		}
-	}
 }
 
 // Save writes the state atomically: a temp file in the same directory,

@@ -7,6 +7,8 @@ package curator
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -98,10 +100,12 @@ type runner struct {
 	me      string
 	state   *State
 	res     *Result
-	stopped bool // E_RATE (or a state write failure): submit nothing more
-	// stateBroken: a state write failed and the file was removed; writing a
-	// state that lacks a post would be worse than writing none.
-	stateBroken bool
+	stopped bool // a 429 or a state write failure: submit nothing more
+	// blocked holds channels with a pending post the hub could not confirm
+	// or refuse: nothing new is posted to them this run.
+	blocked map[string]bool
+	// tried holds pending keys already resent this run.
+	tried map[string]bool
 }
 
 func (r *runner) logf(level, format string, args ...any) {
@@ -127,12 +131,29 @@ func Run(ctx context.Context, opts Options) *Result {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
-	r := &runner{Options: opts, res: &Result{}}
+	r := &runner{Options: opts, res: &Result{}, blocked: map[string]bool{}, tried: map[string]bool{}}
 	r.hub = hubClient{base: opts.Config.HubURL, client: opts.Client}
 	r.me = clankmail.KeyID(opts.Key.Public().(ed25519.PublicKey))
 	r.logf("INFO", "curator %s key=%s hub=%s dry_run=%v", Version, r.me, opts.Config.HubURL, opts.DryRun)
 
+	// Two overlapping runs would both post the same items. Without a state
+	// file there is nothing to lock: overlapping runs must then be
+	// prevented by the schedule.
+	if opts.StatePath != "" && !opts.DryRun {
+		unlock, err := lockState(opts.StatePath)
+		if err != nil {
+			if errors.Is(err, errLocked) {
+				r.fail("another curator run holds %s.lock: posting nothing", opts.StatePath)
+			} else {
+				r.fail("cannot lock %s.lock (%v): posting nothing", opts.StatePath, err)
+			}
+			return r.res
+		}
+		defer unlock()
+	}
+
 	r.loadState()
+	r.resolveAll()
 	if opts.Config.Handle != "" {
 		r.ensureHandle(ctx)
 	}
@@ -144,10 +165,15 @@ func Run(ctx context.Context, opts Options) *Result {
 		}
 		r.runChannel(ctx, &opts.Config.Channels[i])
 	}
-	// Persist what this run learned (rebuilt seen sets, pruning) even when it
-	// posted nothing, so the next run does not read every log again.
-	if !r.stateBroken {
-		r.saveState()
+	// Resolve what this run left unconfirmed, then persist what it learned
+	// (rebuilt seen sets) even when it posted nothing, so the next run does
+	// not read every log again.
+	r.resolveAll()
+	r.saveState()
+	for id, cs := range r.state.Channels {
+		if len(cs.Pending) > 0 {
+			r.fail("channel=%s (%s): %d post(s) the hub has neither confirmed nor refused; they are resent next run and nothing new is posted there until then", cs.Slug, id, len(cs.Pending))
+		}
 	}
 	if r.res.FeedsOK == 0 {
 		r.logf("ERROR", "no feed could be read this run")
@@ -173,53 +199,160 @@ func (r *runner) loadState() {
 		r.logf("INFO", "state file %s absent: rebuilding every channel from its log", r.StatePath)
 		s = newState()
 	}
-	s.prune(r.nowMS() - seenTTLHours*3600*1000)
+	// Seen keys are never forgotten by age: a feed can re-date an old item
+	// (GitHub's releases.atom carries only <updated>, which moves when a
+	// release is edited), and a forgotten key would then post again.
 	r.state = s
 }
 
-// saveState persists the state after a post. If it cannot be written, the
-// state file is removed so the next run rebuilds from the log instead of
-// trusting a file that lacks this post, and submitting stops.
-func (r *runner) saveState() {
+// saveState persists the state. If it cannot be written, submitting stops
+// and the run fails. The file on disk stays as it was, which is safe: every
+// post on it is either seen or pending (written before its submit), and a
+// pending post is resolved by resending its exact token next run.
+func (r *runner) saveState() bool {
 	if r.DryRun || r.StatePath == "" {
-		return
+		return true
 	}
 	if err := r.state.Save(r.StatePath); err != nil {
-		r.fail("state write failed (%v): stopping; removing %s so the next run rebuilds from the log", err, r.StatePath)
-		os.Remove(r.StatePath)
+		r.fail("state write failed (%v): stopping submissions for this run", err)
 		r.stopped = true
-		r.stateBroken = true
+		return false
 	}
+	return true
 }
 
-// submit signs payload, submits it, and checks the hub's answer is the
-// payload's own id. A network error or 5xx is resolved by asking the hub
-// whether it stored the token, so an ambiguous failure is never retried
-// into a second post next run. E_RATE stops the run's submissions.
-func (r *runner) submit(ctx context.Context, what string, payload []byte) (string, bool) {
-	token := clankmail.Sign(r.Key, payload)
-	want := clankmail.ObjectID(payload)
+// outcome is what a submission established about a token.
+type outcome int
+
+const (
+	confirmed outcome = iota // the hub holds it (200 with its id)
+	refused                  // a definitive refusal: the hub does not hold it
+	unknown                  // no answer, 5xx, 429 or a wrong id: it may be stored
+)
+
+// send submits token and classifies the answer. §5 checks "id already
+// stored" before anything else, so resending a stored token answers 200,
+// and any other 4xx means the token is not stored. A 429 is unknown (the
+// per-address limit is charged before that check) and stops submitting for
+// the run, whether or not it carries E_RATE (a relay's 429 does not).
+func (r *runner) send(ctx context.Context, what, token string) (outcome, error) {
+	want := tokenID(token)
 	id, err := r.hub.submit(ctx, token)
-	if err != nil {
-		he, isHub := err.(*HubError)
-		if isHub && he.Code == "E_RATE" {
-			r.fail("%s: rate limited (E_RATE): stopping submissions for this run", what)
+	if err == nil {
+		if id != want {
+			return unknown, fmt.Errorf("%w: hub returned id %s, want %s", errWrongID, id, want)
+		}
+		return confirmed, nil
+	}
+	if he, ok := err.(*HubError); ok {
+		switch {
+		case he.Status == http.StatusTooManyRequests:
+			if !r.stopped {
+				r.fail("%s: rate limited (HTTP 429 %s): stopping submissions for this run", what, he.Code)
+			}
 			r.res.RateLimited = true
 			r.stopped = true
-			return "", false
+			return unknown, err
+		case he.Status >= 400 && he.Status < 500:
+			return refused, err
 		}
-		if (!isHub || he.Status >= 500) && r.hub.stored(ctx, want, token) {
-			r.logf("INFO", "%s: submit errored (%v) but the hub holds %s", what, err, want)
-			return want, true
-		}
+	}
+	return unknown, err
+}
+
+// errWrongID marks a 200 whose id is not the token's: the hub misbehaves,
+// and asking it whether it holds the token settles nothing.
+var errWrongID = errors.New("wrong id")
+
+// tokenID is the m_ id of one of our own tokens.
+func tokenID(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 4 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return ""
+	}
+	return clankmail.ObjectID(payload)
+}
+
+// submit signs and submits a handle or channel object. These are not
+// tracked as pending: a duplicate of either is refused or harmless (a slug
+// binds once, a handle names one key). An unknown outcome is settled by
+// asking the hub whether it holds the token.
+func (r *runner) submit(ctx context.Context, what string, payload []byte) (string, bool) {
+	token := clankmail.Sign(r.Key, payload)
+	out, err := r.send(ctx, what, token)
+	switch {
+	case out == confirmed:
+		return tokenID(token), true
+	case out == unknown && !r.res.RateLimited && !errors.Is(err, errWrongID) && r.hub.stored(ctx, tokenID(token), token):
+		r.logf("INFO", "%s: submit errored (%v) but the hub holds it", what, err)
+		return tokenID(token), true
+	case !r.res.RateLimited:
 		r.fail("%s: submit failed: %v", what, err)
-		return "", false
 	}
-	if id != want {
-		r.fail("%s: hub returned id %s, want %s", what, id, want)
-		return "", false
+	return "", false
+}
+
+// resolveTimeout bounds one resend of a pending token.
+const resolveTimeout = 15 * time.Second
+
+// resolveAll resends every pending token not yet tried this run, under a
+// fresh context: the run's own may be cancelled (SIGTERM), and a pending post
+// must still be settled. Confirmed → seen; refused → dropped (it was never
+// stored, so the item may legitimately post once later); unknown → kept,
+// and its channel posts nothing new this run.
+func (r *runner) resolveAll() {
+	if r.DryRun {
+		for id, cs := range r.state.Channels {
+			if len(cs.Pending) > 0 {
+				r.logf("DRY-RUN", "channel=%s (%s): would resend %d pending post(s)", cs.Slug, id, len(cs.Pending))
+			}
+		}
+		return
 	}
-	return id, true
+	ids := make([]string, 0, len(r.state.Channels))
+	for id := range r.state.Channels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		cs := r.state.Channels[id]
+		keys := make([]string, 0, len(cs.Pending))
+		for k := range cs.Pending {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r.tried[id+" "+k] {
+				r.blocked[id] = true
+				continue
+			}
+			if r.stopped {
+				r.blocked[id] = true
+				continue
+			}
+			r.tried[id+" "+k] = true
+			ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+			out, err := r.send(ctx, "channel="+cs.Slug+" resend "+k, cs.Pending[k])
+			cancel()
+			switch out {
+			case confirmed:
+				delete(cs.Pending, k)
+				cs.Seen[k] = r.nowMS()
+				r.logf("INFO", "channel=%s pending post %s confirmed by the hub", cs.Slug, k)
+			case refused:
+				delete(cs.Pending, k)
+				r.logf("WARN", "channel=%s pending post %s was not stored (%v): dropped; the item may post again", cs.Slug, k, err)
+			default:
+				r.blocked[id] = true
+				r.logf("WARN", "channel=%s pending post %s still unconfirmed (%v)", cs.Slug, k, err)
+			}
+			r.saveState()
+		}
+	}
 }
 
 func (r *runner) ensureHandle(ctx context.Context) {
@@ -316,34 +449,36 @@ func (r *runner) ensureChannel(ctx context.Context, ch *Channel) (string, bool) 
 // verifies, is a msg to this channel, and is signed by this key, keyed by the
 // first line of its body (always the link, see formatPost).
 func (r *runner) rebuildSeen(ctx context.Context, channelID string) (map[string]int64, error) {
-	toks, err := r.hub.logTokens(ctx, channelID)
-	if err != nil {
-		return nil, err
-	}
 	seen := map[string]int64{}
 	ignored := 0
-	for _, tok := range toks {
-		obj, err := clankmail.Verify(tok)
-		if err != nil || obj.Type != "msg" || obj.From != r.me {
-			ignored++
-			continue
+	// Verified page by page; only the keys are kept.
+	err := r.hub.eachLogPage(ctx, channelID, func(toks []string) {
+		for _, tok := range toks {
+			obj, err := clankmail.Verify(tok)
+			if err != nil || obj.Type != "msg" || obj.From != r.me {
+				ignored++
+				continue
+			}
+			to := strList(obj.Fields["to"])
+			if len(to) != 1 || to[0] != channelID {
+				ignored++
+				continue
+			}
+			body, _ := obj.Fields["body"].(string)
+			line, _, _ := strings.Cut(body, "\n")
+			key := keyFromLine(line)
+			if key == "" {
+				ignored++
+				continue
+			}
+			at := obj.Fields["ts"].(int64)
+			if prev, ok := seen[key]; !ok || at < prev {
+				seen[key] = at
+			}
 		}
-		to := strList(obj.Fields["to"])
-		if len(to) != 1 || to[0] != channelID {
-			ignored++
-			continue
-		}
-		body, _ := obj.Fields["body"].(string)
-		line, _, _ := strings.Cut(body, "\n")
-		key := keyFromLine(line)
-		if key == "" {
-			ignored++
-			continue
-		}
-		at := obj.Fields["ts"].(int64)
-		if prev, ok := seen[key]; !ok || at < prev {
-			seen[key] = at
-		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	r.logf("INFO", "rebuilt seen set for %s from its log: %d posts of ours, %d other log entries ignored", channelID, len(seen), ignored)
 	return seen, nil
@@ -354,6 +489,9 @@ func (r *runner) runChannel(ctx context.Context, ch *Channel) {
 	defer func() { r.res.Channels = append(r.res.Channels, stats) }()
 
 	id, ok := r.ensureChannel(ctx, ch)
+	if ok && r.blocked[id] {
+		r.fail("channel=%s has a post the hub has not confirmed: posting nothing new to it this run", ch.Slug)
+	}
 	if !ok {
 		if !r.DryRun {
 			return
@@ -373,7 +511,6 @@ func (r *runner) runChannel(ctx context.Context, ch *Channel) {
 		}
 		seen = s
 		r.state.Channels[id] = &ChannelState{Slug: ch.Slug, Seen: seen}
-		r.state.prune(r.nowMS() - seenTTLHours*3600*1000)
 	} else {
 		seen = map[string]int64{} // dry run of a channel that does not exist yet
 	}
@@ -404,18 +541,43 @@ func (r *runner) runChannel(ctx context.Context, ch *Channel) {
 			stats.Posted++
 			continue
 		}
-		if r.stopped {
+		if r.stopped || r.blocked[id] {
 			return
 		}
-		payload := msgPayload(r.Key, id, subject, body, r.nowMS())
-		if _, ok := r.submit(ctx, "channel="+ch.Slug+" post "+c.line, payload); !ok {
-			continue
+		cs := r.state.Channels[id]
+		token := clankmail.Sign(r.Key, msgPayload(r.Key, id, subject, body, r.nowMS()))
+		// Write-ahead: the token is on disk before the hub can see it.
+		if cs.Pending == nil {
+			cs.Pending = map[string]string{}
 		}
-		stats.Posted++
-		seen[c.key] = r.nowMS()
-		r.saveState()
-		if r.afterPost != nil {
-			r.afterPost(c.key)
+		cs.Pending[c.key] = token
+		if !r.saveState() {
+			delete(cs.Pending, c.key) // never submitted
+			return
+		}
+		what := "channel=" + ch.Slug + " post " + c.line
+		out, err := r.send(ctx, what, token)
+		switch out {
+		case confirmed:
+			delete(cs.Pending, c.key)
+			seen[c.key] = r.nowMS()
+			stats.Posted++
+			if !r.saveState() {
+				return // the pending record on disk settles it next run
+			}
+			if r.afterPost != nil {
+				r.afterPost(c.key)
+			}
+		case refused:
+			delete(cs.Pending, c.key)
+			r.fail("%s: submit refused: %v", what, err)
+			r.saveState()
+		default:
+			// Stored or not, we cannot tell yet: keep the pending record,
+			// resend it at the end of the run, post nothing more here.
+			r.blocked[id] = true
+			r.logf("WARN", "%s: unconfirmed (%v): will resend the same token", what, err)
+			return
 		}
 	}
 }
@@ -428,7 +590,7 @@ type fetchedFeed struct {
 }
 
 type candidate struct {
-	key     string // dedupe key: the normalised link, or "guid:" + guid
+	key     string // dedupe key: always keyFromLine(line)
 	line    string // first body line: the normalised link, or the guid
 	title   string
 	summary string
@@ -480,12 +642,13 @@ func selectItems(ch *Channel, feeds []fetchedFeed, seen map[string]int64, now ti
 			if line == "" {
 				line = NormalizeLink(it.GUID)
 			}
-			key := line
 			if line == "" {
-				if g := clip(PlainText(it.GUID), maxLink); g != "" {
-					line, key = g, "guid:"+g
-				}
+				line = clip(PlainText(it.GUID), maxLink)
 			}
+			// The key is derived from the exact first line that will be
+			// posted, by the same function the log rebuild uses, so the two
+			// can never disagree.
+			key := keyFromLine(line)
 			text := it.Title + "\n" + it.Summary
 			if key == "" ||
 				len(ff.cfg.Include) > 0 && !MatchesKeyword(text, ff.cfg.Include) ||

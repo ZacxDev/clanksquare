@@ -39,6 +39,21 @@ type fakeHub struct {
 	breakAfterStore bool
 	// wrongID: answer every submit with a different id.
 	wrongID bool
+	// objects502: the next n GET /v1/objects answer 502.
+	objects502 int
+	// down: every submit is answered 502; a new token is still stored
+	// first (the hub stored it, the answer was lost).
+	down bool
+	// staleBefore > 0: a new (unstored) token with ts below it is E_STALE.
+	staleBefore int64
+	// plain429After > 0: submissions after this many accepted ones get a
+	// bare 429 with an HTML body and no ClankMail error code (a relay's).
+	plain429After int
+	// onStore, when set, runs after a new msg is stored and before the
+	// answer is written (the hub mutex is not held).
+	onStore func(obj *clankmail.Object)
+	// postSubmits counts every msg submission received, stored or not.
+	postSubmits int
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -53,6 +68,12 @@ func newFakeHub(t *testing.T) *fakeHub {
 	h.srv = httptest.NewServer(mux)
 	t.Cleanup(h.srv.Close)
 	return h
+}
+
+func (h *fakeHub) setOnStore(fn func(*clankmail.Object)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onStore = fn
 }
 
 func hubErr(w http.ResponseWriter, status int, code, detail string) {
@@ -75,9 +96,31 @@ func (h *fakeHub) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			h.mu.Unlock()
+		}
+	}()
+	if obj.Type == "msg" {
+		h.postSubmits++
+	}
 	if _, ok := h.objects[obj.ID]; ok {
+		if h.down {
+			hubErr(w, 502, "", "bad gateway")
+			return
+		}
 		okJSON(w, map[string]string{"id": obj.ID}) // idempotent
+		return
+	}
+	if h.staleBefore > 0 && obj.Fields["ts"].(int64) < h.staleBefore {
+		hubErr(w, 400, "E_STALE", "ts outside the window")
+		return
+	}
+	if h.plain429After > 0 && len(h.submits) >= h.plain429After {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(429)
+		io.WriteString(w, "<html><body>Too Many Requests</body></html>")
 		return
 	}
 	if h.rateAfter > 0 && len(h.submits) >= h.rateAfter {
@@ -136,6 +179,18 @@ func (h *fakeHub) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	h.objects[obj.ID] = tok
 	h.submits = append(h.submits, obj.Type)
+	if obj.Type == "msg" && h.onStore != nil {
+		hook := h.onStore
+		h.mu.Unlock()
+		unlocked = true
+		hook(obj)
+		h.mu.Lock()
+		unlocked = false
+	}
+	if h.down {
+		hubErr(w, 502, "", "bad gateway")
+		return
+	}
 	if h.breakAfterStore {
 		h.breakAfterStore = false
 		hubErr(w, 502, "", "bad gateway")
@@ -204,6 +259,11 @@ func (h *fakeHub) handleHandle(w http.ResponseWriter, r *http.Request) {
 func (h *fakeHub) handleObject(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.objects502 > 0 {
+		h.objects502--
+		hubErr(w, 502, "", "bad gateway")
+		return
+	}
 	id := r.PathValue("id")
 	tok, ok := h.objects[id]
 	if !ok {

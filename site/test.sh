@@ -108,15 +108,32 @@ check '! grep -nE "innerHTML|outerHTML|insertAdjacentHTML|document\.write|\.html
 check 'grep -q "__HUB_URL__" "$here/index.html" && grep -q "connect-src __HUB_URL__;" "$here/nginx.conf" && ! grep -q "$PROD_HUB" "$here/index.html" "$here/nginx.conf"' \
   "the hub URL is set only in site/Dockerfile (index.html and nginx.conf carry the placeholder)"
 
-# A HUB_URL that is not a bare origin is refused at build time. Both values
-# would otherwise build (nginx -t accepts them); only the origin check stops them.
-for bad in "https://x.example/path" "https://x.example https://evil.example"; do
-  if docker build -q -f "$root/site/Dockerfile" --build-arg "HUB_URL=$bad" -t "$id-bad" "$root" >/dev/null 2>&1; then
+# Build arguments that are not what they claim are refused at build time, and
+# refused BY THE GUARD (its own message), not by a later step failing by
+# accident: a newline value, for one, also breaks sed.
+NL=$'\n'
+LAUNCH_KEY="k_ildi4gc4czoegaf4b526pmc2pmymrj7tqm5zbp7w7pvd57s3zvya"
+# The guard prints "<ARG> must be ..., got [<value>]" to stderr. In the plain
+# build log the RUN step's header echoes the whole command, build args
+# EXPANDED, so the message text appears there whether or not the guard fired.
+# Only the process's own output lines carry a "#<step> <seconds> " prefix, so
+# the check reads those lines alone.
+refused() { # refused <ARG> <value>
+  local log="$work/build.log"
+  if docker build --progress=plain -f "$root/site/Dockerfile" --build-arg "$1=$2" -t "$id-bad" "$root" >"$log" 2>&1; then
     docker image rm "$id-bad" >/dev/null 2>&1 || true
-    notok "HUB_URL '$bad' is refused at build time"
+    notok "$1=$(printf %q "$2") is refused at build time (it built)"
+  elif grep -E '^#[0-9]+ [0-9]+\.[0-9]+ ' "$log" | grep -qF -- "$1 must be"; then
+    ok "$1=$(printf %q "$2") is refused at build time by its guard"
   else
-    ok "HUB_URL '$bad' is refused at build time"
+    notok "$1=$(printf %q "$2") is refused, but not by its guard: $(grep -m1 -iE 'error|unterminated' "$log" | cut -c1-120)"
   fi
+}
+for bad in "https://x.example/path" "https://x.example https://evil.example" "https://x.example${NL}; script-src *" "https://x.example${NL}"; do
+  refused HUB_URL "$bad"
+done
+for bad in "k_short" "$LAUNCH_KEY," "$LAUNCH_KEY,,$LAUNCH_KEY" "K_ILDI4GC4CZOEGAF4B526PMC2PMYMRJ7TQM5ZBP7W7PVD57S3ZVYA" "$LAUNCH_KEY${NL}x" "$LAUNCH_KEY\"><script>" ""; do
+  refused LAUNCH_OWNERS "$bad"
 done
 
 # ── stub hubs ───────────────────────────────────────────────────────
@@ -124,16 +141,26 @@ XSS='<img src=x onerror=alert(1)>'
 python3 - "$work" "$XSS" <<'EOF'
 import base64, json, sys
 work, xss = sys.argv[1], sys.argv[2]
+LAUNCH = "k_ildi4gc4czoegaf4b526pmc2pmymrj7tqm5zbp7w7pvd57s3zvya"   # the curator (site/Dockerfile default)
+OTHER = "k_" + "o" * 52                                             # anyone else
 def tok(m):
     p = base64.urlsafe_b64encode(json.dumps(m).encode()).rstrip(b"=").decode()
-    return "v1.k_stubsigner.%s.c2ln" % p
+    return "v1.%s.%s.c2ln" % (m["from"], p)
+def ch(cid, members, posts, frm, slug, title, about, tags):
+    return {"channel": cid, "members": members, "posts_7d": posts, "manifest": tok(
+        {"v": 1, "t": "channel", "from": frm, "slug": slug, "title": title, "about": about, "tags": tags})}
+# Every character the page must strip, once each (bidi, zero-width, line/para
+# separators, BOM, soft hyphen, invisible operators, C0 and C1 controls).
+INVISIBLE = ("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200b\u200c\u200d\u200e\u200f"
+             "\u2028\u2029\ufeff\u00ad\u2060\u2061\u2062\u2063\u2064\u0000\u0001\u0009\u000a\u001f\u007f\u0080\u009f")
 items = [
-    {"channel": "c_hostile", "members": 3, "posts_7d": 7, "manifest": tok(
-        {"v": 1, "t": "channel", "slug": xss, "title": xss, "about": "about " + xss, "tags": ["x"]})},
-    {"channel": "c_smoke", "members": 13, "posts_7d": 17, "manifest": tok(
-        {"v": 1, "t": "channel", "slug": "smoke-hidden", "title": "smoke", "about": "", "tags": ["smoke"]})},
-    {"channel": "c_plain", "members": 5, "posts_7d": 11, "manifest": tok(
-        {"v": 1, "t": "channel", "slug": "plain", "title": "Plain", "about": "A plain channel.", "tags": []})},
+    ch("c_hostile", 3, 7, OTHER, xss, xss, "about " + xss, ["x"]),
+    ch("c_smoke", 13, 17, OTHER, "smoke-hidden", "smoke", "", ["smoke"]),
+    ch("c_smoke_zw", 12, 16, OTHER, "smoke-zw", "smoke", "", ["smo\u200bke"]),
+    ch("c_plain", 5, 11, OTHER, "plain", "Plain", "A plain channel.", []),
+    ch("c_bidi", 4, 6, OTHER, "bi\u200bdi", "invoice\u202efdp.exe\u200b\u200d!", "a" + INVISIBLE + "b", []),
+    ch("c_lookalike", 2, 5, OTHER, "agent-tooling", "Agent tooling releases", "Looks like the launch channel.", []),
+    ch("c_launch", 1, 2, LAUNCH, "agent-tooling", "Agent tooling releases", "Releases of agent tooling.", ["agents"]),
 ]
 open(work + "/list.json", "w").write(json.dumps({"items": items, "next": ""}))
 EOF
@@ -143,7 +170,7 @@ cat > "$work/stub.conf" <<'EOF'
 pid /tmp/nginx.pid;
 events {}
 http {
-  log_format stub 'STUB $server_port $request_method $request_uri';
+  log_format stub 'STUB $server_port $request_method $request_uri $status';
   access_log /dev/stdout stub;
   server {
     listen 8080;
@@ -225,13 +252,16 @@ run_browser() {
     notok "browser checks ($1) ran no assertions"
   fi
 }
+# The stub's log so far holds the curl controls' own requests; only lines
+# written after this point are the browser's.
+stub_log_before="$(docker logs "$stub" 2>/dev/null | grep -c '^STUB ' || true)"
 run_browser stub "$cors_base"
 run_browser nocors "$nocors_base"
 
-stub_log="$(docker logs "$stub" 2>/dev/null | grep '^STUB ' || true)"
-check 'grep -q "^STUB 8080 GET /v1/channels?sort=active$" <<<"$stub_log"' "the CORS stub was fetched by the page (GET /v1/channels?sort=active)"
-check 'grep -q "^STUB 8081 GET /v1/channels?sort=active$" <<<"$stub_log"' "the no-CORS stub was fetched too: the browser got an answer and refused it"
-check '! grep -qv " GET /v1/channels?" <<<"$stub_log"' "the page only ever asked the hub for GET /v1/channels (no preflight, no other path)"
+stub_log="$(docker logs "$stub" 2>/dev/null | grep '^STUB ' | tail -n +"$((stub_log_before + 1))" || true)"
+check 'grep -q "^STUB 8080 GET /v1/channels?sort=active 200$" <<<"$stub_log"' "the page fetched the CORS stub (GET /v1/channels?sort=active, 200)"
+check 'grep -q "^STUB 8081 GET /v1/channels?sort=active 200$" <<<"$stub_log"' "the page fetched the no-CORS stub and it answered 200: the browser refused the answer"
+check '[ -n "$stub_log" ] && ! grep -qv " GET /v1/channels?" <<<"$stub_log"' "the page only ever asked the hub for GET /v1/channels (no preflight, no other path)"
 
 if [ "${CHECK_LIVE:-0}" = 1 ]; then
   run_browser live "$base"

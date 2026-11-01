@@ -68,12 +68,17 @@ func FetchFeed(ctx context.Context, client *http.Client, url string) (*Feed, err
 	return ParseFeed(body)
 }
 
-// ParseFeed parses an RSS 2.0, RSS 1.0 (RDF) or Atom document.
+// ParseFeed parses an RSS 2.0, RSS 1.0 (RDF) or Atom document. It streams:
+// elements other than the feed title and its items are skipped unread, and
+// decoding stops once maxItemsPerFeed items are in hand, so the work and
+// memory spent on one feed are bounded by the cap, not by what the feed
+// sends (a 5 MB feed of empty <item/> elements stops after 1000 of them).
 func ParseFeed(data []byte) (*Feed, error) {
 	d := xml.NewDecoder(bytes.NewReader(data))
 	d.Strict = true
 	d.Entity = xml.HTMLEntity // &nbsp; and friends appear in real feeds
 	d.CharsetReader = charsetReader
+	var root xml.StartElement
 	for {
 		tok, err := d.Token()
 		if err != nil {
@@ -82,46 +87,111 @@ func ParseFeed(data []byte) (*Feed, error) {
 			}
 			return nil, fmt.Errorf("parse: %w", err)
 		}
-		start, ok := tok.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		switch start.Name.Local {
-		case "rss":
-			var doc struct {
-				Channel struct {
-					Title textNode  `xml:"title"`
-					Items []rssItem `xml:"item"`
-				} `xml:"channel"`
-			}
-			if err := d.DecodeElement(&doc, &start); err != nil {
-				return nil, fmt.Errorf("parse rss: %w", err)
-			}
-			return rssFeed(doc.Channel.Title, doc.Channel.Items), nil
-		case "RDF":
-			var doc struct {
-				Channel struct {
-					Title textNode `xml:"title"`
-				} `xml:"channel"`
-				Items []rssItem `xml:"item"`
-			}
-			if err := d.DecodeElement(&doc, &start); err != nil {
-				return nil, fmt.Errorf("parse rdf: %w", err)
-			}
-			return rssFeed(doc.Channel.Title, doc.Items), nil
-		case "feed":
-			var doc struct {
-				Title   textNode    `xml:"title"`
-				Entries []atomEntry `xml:"entry"`
-			}
-			if err := d.DecodeElement(&doc, &start); err != nil {
-				return nil, fmt.Errorf("parse atom: %w", err)
-			}
-			return atomFeed(doc.Title, doc.Entries), nil
-		default:
-			return nil, fmt.Errorf("not a feed: root element <%s>", start.Name.Local)
+		if se, ok := tok.(xml.StartElement); ok {
+			root = se
+			break
 		}
 	}
+	var (
+		title   textNode
+		rss     []rssItem
+		entries []atomEntry
+	)
+	full := func() bool { return len(rss)+len(entries) >= maxItemsPerFeed }
+	var err error
+	switch root.Name.Local {
+	case "rss":
+		err = eachChild(d, func(se xml.StartElement) error {
+			if se.Name.Local != "channel" {
+				return d.Skip()
+			}
+			return eachChild(d, func(se xml.StartElement) error {
+				return rssChild(d, se, &title, &rss, full)
+			})
+		})
+	case "RDF":
+		err = eachChild(d, func(se xml.StartElement) error {
+			if se.Name.Local == "channel" {
+				return eachChild(d, func(se xml.StartElement) error {
+					if se.Name.Local == "title" {
+						return d.DecodeElement(&title, &se)
+					}
+					return d.Skip()
+				})
+			}
+			return rssChild(d, se, nil, &rss, full)
+		})
+	case "feed":
+		err = eachChild(d, func(se xml.StartElement) error {
+			switch se.Name.Local {
+			case "title":
+				return d.DecodeElement(&title, &se)
+			case "entry":
+				var e atomEntry
+				if err := d.DecodeElement(&e, &se); err != nil {
+					return err
+				}
+				entries = append(entries, e)
+				if full() {
+					return errFull
+				}
+				return nil
+			}
+			return d.Skip()
+		})
+	default:
+		return nil, fmt.Errorf("not a feed: root element <%s>", root.Name.Local)
+	}
+	if err != nil && err != errFull {
+		return nil, fmt.Errorf("parse %s: %w", root.Name.Local, err)
+	}
+	if root.Name.Local == "feed" {
+		return atomFeed(title, entries), nil
+	}
+	return rssFeed(title, rss), nil
+}
+
+// errFull stops decoding once the item cap is reached.
+var errFull = errors.New("item cap reached")
+
+// eachChild calls fn for every child element of the element whose start
+// tag was just read, until its end tag. fn must consume the element it is
+// given (DecodeElement or Skip).
+func eachChild(d *xml.Decoder, fn func(xml.StartElement) error) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if err := fn(t); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			return nil
+		}
+	}
+}
+
+// rssChild handles one child of an RSS <channel> (or of an RDF root): the
+// title (when title is not nil) and items; everything else is skipped.
+func rssChild(d *xml.Decoder, se xml.StartElement, title *textNode, items *[]rssItem, full func() bool) error {
+	switch {
+	case se.Name.Local == "title" && title != nil:
+		return d.DecodeElement(title, &se)
+	case se.Name.Local == "item":
+		var it rssItem
+		if err := d.DecodeElement(&it, &se); err != nil {
+			return err
+		}
+		*items = append(*items, it)
+		if full() {
+			return errFull
+		}
+		return nil
+	}
+	return d.Skip()
 }
 
 // charsetReader accepts the encodings real feeds declare besides UTF-8.

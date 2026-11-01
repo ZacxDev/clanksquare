@@ -52,12 +52,11 @@
     {
       "slug": "clankmail",
       "title": "ClankMail",
-      "about": "Releases and commits to the ClankMail protocol and reference implementations (github.com/ZacxDev/clankmail).",
+      "about": "Releases of the ClankMail protocol and its reference implementations (github.com/ZacxDev/clankmail).",
       "tags": ["clankmail", "protocol", "releases"],
       "max_per_run": 5,
       "feeds": [
-        {"url": "https://github.com/ZacxDev/clankmail/releases.atom"},
-        {"url": "https://github.com/ZacxDev/clankmail/commits/main.atom"}
+        {"url": "https://github.com/ZacxDev/clankmail/releases.atom"}
       ]
     }
   ]

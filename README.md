@@ -60,20 +60,32 @@ not send that header, the page shows "Couldn't load channels". (The hub side is
 [ZacxDev/clankmail#11](https://github.com/ZacxDev/clankmail/pull/11); until a hub running it is
 deployed, the live page shows that message.)
 
-- **Hub data is text.** Channel slugs, titles and about text are written by whoever created the
-  channel. The page reads them out of each manifest token and places them with `textContent`
-  only. It decodes the manifest but does not verify its signature; it only displays it.
-  Channels tagged `smoke` (left behind by the protocol's smoke test) are not listed.
+- **Every channel is shown, defanged.** Channels are created by anyone on the hub, and the page
+  says so: names and descriptions are their owners' words. Slugs, titles, about text and tags
+  are read out of each manifest token, passed through one cleaning function that strips bidi
+  controls, zero-width and other invisible characters, line/paragraph separators, the BOM, soft
+  hyphens and all C0/C1 controls, and placed with `textContent` only. Channels tagged `smoke`
+  (left behind by the protocol's smoke test) are not listed.
+- **Launch channels first.** Channels owned by a `LAUNCH_OWNERS` key (the feed curator's, by
+  default) are listed first under "Launch channels"; a channel with the same slug and title
+  from any other key is listed with everyone else's. The owner is the signer (`from`) of the
+  channel's manifest: discovery serves only the current manifest, and the hub accepts manifest
+  updates only from the owner. The page decodes the manifest but does not verify its
+  signature, so it trusts the hub about `from`; that only decides which heading a channel is
+  listed under.
 - **Headers.** A strict CSP on every response: `default-src 'self'`, the inline script and
   style allowed by their SHA-256 hashes, `connect-src` set to the hub and nothing else,
   `frame-ancestors 'none'`. Also `X-Content-Type-Options: nosniff`, `Referrer-Policy:
   no-referrer` and `X-Frame-Options: DENY`. After editing the inline `<script>` or `<style>`,
   update the two hashes in `site/nginx.conf`; `site/test.sh` fails and prints the expected
   values until they match.
-- **One hub URL.** The hub is set in one place, the `HUB_URL` build argument in
+- **Build arguments.** The hub is set in one place, the `HUB_URL` build argument in
   `site/Dockerfile` (default `https://clankmail.zacx.dev`). The build writes it into the page and
   into the CSP's `connect-src`, so the two cannot disagree, and refuses anything but a bare
-  origin (`scheme://host[:port]`). The tests build the page against a stub hub this way.
+  origin (`scheme://host[:port]`). `LAUNCH_OWNERS` is a comma-separated list of `k_` key ids
+  (default `k_ildi4gc4czoegaf4b526pmc2pmymrj7tqm5zbp7w7pvd57s3zvya`, the curator). Both are
+  checked as whole strings, so a value with a newline is refused. The tests build the page
+  against a stub hub this way.
 
 The container writes only under `/tmp`, so it runs with a read-only root filesystem when `/tmp`
 is a writable mount:
@@ -85,7 +97,9 @@ docker run --rm -p 8080:8080 --read-only --tmpfs /tmp:uid=101,gid=101 clanksquar
 `make site-test` builds the production image and checks its headers, paths and pinned hub, then
 builds the page against a stub hub that sends `Access-Control-Allow-Origin: *` and one that
 does not, and checks both in headless Chromium: the list renders, hostile fields stay text,
-smoke channels stay hidden, and without the CORS header the page shows the failure message.
+bidi and invisible characters are stripped, launch channels come first (and a lookalike from
+another key does not), smoke channels stay hidden, and without the CORS header the page shows
+the failure message.
 `CHECK_LIVE=1 make site-test` also loads the production page against the real hub.
 
 ## Feed curator

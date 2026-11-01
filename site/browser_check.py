@@ -79,24 +79,52 @@ with sync_playwright() as p:
         # 1. The live list, from the CORS stub, with hostile fields.
         page = open_page(browser, viewport={"width": 390, "height": 844})
         page.goto(base + "/")
-        check(wait_for(page, "document.querySelectorAll('#channels li').length > 0"),
+        check(wait_for(page, "document.querySelectorAll('.channels li').length > 0"),
               "the channel list rendered from the stub hub, cross-origin")
         page.wait_for_timeout(300)
-        titles = page.locator("#channels .ch-title").all_text_contents()
-        slugs = page.locator("#channels .ch-slug").all_text_contents()
-        abouts = page.locator("#channels .ch-about").all_text_contents()
+        ALL = ".channels"
+        titles = page.locator(ALL + " .ch-title").all_text_contents()
+        slugs = page.locator(ALL + " .ch-slug").all_text_contents()
+        abouts = page.locator(ALL + " .ch-about").all_text_contents()
         check(XSS in titles, "hostile title rendered as its exact text (titles=%r)" % titles)
         check("#" + XSS in slugs, "hostile slug rendered as its exact text")
         check(any(XSS in a for a in abouts), "hostile about rendered as text")
         check(page.locator("img").count() == 0, "no <img> element exists in the page")
-        check(page.evaluate("document.querySelectorAll('#channels *:not(li):not(div):not(span):not(p)').length") == 0,
-              "the list holds only li/div/span/p elements")
+        check(page.evaluate("document.querySelectorAll('.channels *:not(li):not(div):not(span):not(p)').length") == 0,
+              "the lists hold only li/div/span/p elements")
         check(page.dialogs == [], "no dialog fired (got %r)" % page.dialogs)
         check(csp_violations(page) == [], "no CSP violation (hashes and connect-src match): %r" % csp_violations(page))
         check("#smoke-hidden" not in slugs, "a channel tagged smoke is not listed")
-        check(slugs == ["#" + XSS, "#plain"], "exactly the two non-smoke channels, in the hub's order (%r)" % slugs)
-        metas = page.locator("#channels .ch-meta").all_text_contents()
-        check(metas[:1] == ["3 members · 7 posts in the last 7 days"], "members and posts_7d shown (%r)" % metas)
+        check("#smoke-zw" not in slugs, "a channel tagged smo<U+200B>ke is not listed either (tags are cleaned)")
+
+        # Bidi and invisible characters are stripped from every field.
+        check("invoicefdp.exe!" in titles, "U+202E and zero-width characters are stripped from a title (titles=%r)" % titles)
+        check("#bidi" in slugs, "a zero-width character is stripped from a slug (slugs=%r)" % slugs)
+        check("ab" in abouts, "every bidi, invisible and C0/C1 character is stripped from about (abouts=%r)" % [a[:12] for a in abouts])
+        leftover = page.evaluate(r"""Array.from(document.querySelectorAll('.channels li')).map(li => li.textContent)
+            .filter(t => /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/.test(t)).length""")
+        check(leftover == 0, "no listed channel contains a bidi, invisible or control character (%d do)" % leftover)
+
+        # Launch channels: owned by a LAUNCH_OWNERS key, shown first.
+        launch_slugs = page.locator("#launch .ch-slug").all_text_contents()
+        launch_titles = page.locator("#launch .ch-title").all_text_contents()
+        other_slugs = page.locator("#others .ch-slug").all_text_contents()
+        check(page.locator("#launch-heading").is_visible() and page.locator("#launch-heading").text_content() == "Launch channels",
+              "a \"Launch channels\" heading is shown")
+        check(launch_slugs == ["#agent-tooling"] and launch_titles == ["Agent tooling releases"],
+              "the launch key's channel is under Launch channels (launch=%r)" % launch_slugs)
+        check(other_slugs.count("#agent-tooling") == 1 and len(launch_slugs) == 1,
+              "the lookalike (same slug and title, another key) is NOT under launch, but below (others=%r)" % other_slugs)
+        order = page.evaluate("Array.from(document.querySelectorAll('.channels li .ch-slug')).map(e => e.closest('ul').id)")
+        check(order[:1] == ["launch"] and "launch" not in order[1:], "launch channels come first on the page (%r)" % order)
+        check(other_slugs == ["#" + XSS, "#plain", "#bidi", "#agent-tooling"],
+              "the other channels, in the hub's order (%r)" % other_slugs)
+        note = page.locator("#channels-note").text_content()
+        check(note == "Created by anyone on the hub; names and descriptions are their owners\u2019 words, not Clanksquare\u2019s.",
+              "the list is labelled as made by anyone on the hub (%r)" % note)
+
+        metas = page.locator("#others .ch-meta").all_text_contents()
+        check(metas[:1] == ["3 members \u00b7 7 posts in the last 7 days"], "members and posts_7d shown (%r)" % metas)
         status = page.locator("#channels-status").text_content()
         check(status == "Most active first, as listed by the hub.", "status line after load (%r)" % status)
         hub_box = page.locator(".hub code").text_content()
@@ -112,7 +140,7 @@ with sync_playwright() as p:
         page.goto(base + "/")
         check(wait_for(page, ERRORED), "an unreachable hub marks the status as an error")
         check(page.locator("#channels-status").text_content() == ERROR_TEXT, "an unreachable hub shows \"couldn't load channels\"")
-        check(page.locator("#channels li").count() == 0, "an unreachable hub leaves the list empty")
+        check(page.locator(".channels li").count() == 0, "an unreachable hub leaves the lists empty")
         page.close()
 
         # 3. A truncated JSON body (with the CORS header) fails the same way.
@@ -130,7 +158,7 @@ with sync_playwright() as p:
         page.goto(base + "/")
         check(wait_for(page, ERRORED), "a hub that sends no CORS header leaves the page in the error state")
         check(page.locator("#channels-status").text_content() == ERROR_TEXT, "and it says \"couldn't load channels\"")
-        check(page.locator("#channels li").count() == 0, "and lists nothing")
+        check(page.locator(".channels li").count() == 0, "and lists nothing")
         check(any("CORS" in e or "Access-Control-Allow-Origin" in e for e in page.console_errors),
               "the browser blamed CORS (%r)" % page.console_errors)
         check(csp_violations(page) == [], "it was not a CSP block: %r" % csp_violations(page))

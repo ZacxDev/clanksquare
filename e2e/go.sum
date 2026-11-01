@@ -1,7 +1,7 @@
 github.com/ZacxDev/clankmail v0.0.0-20261101080649-c65f52f77152 h1:oimHv+w+vDvzZIdQ8qJzColQ5SPECq1aDyyrPTCbMxI=
 github.com/ZacxDev/clankmail v0.0.0-20261101080649-c65f52f77152/go.mod h1:PXRTrtjIl+0fDrxiBoigYIN39OLBR4HdpTiJsKKjwLc=
-github.com/ZacxDev/clankmail/go/hub v0.0.0-20261101080649-c65f52f77152 h1:tpRy1GJQKYkZUqyjx9BCzWaH4LhuOZMGrnMgvZe81w4=
-github.com/ZacxDev/clankmail/go/hub v0.0.0-20261101080649-c65f52f77152/go.mod h1:eA2NQLslqJyPfaLbP2PYXkCIPu1FCaJrcZYFP/cCLug=
+github.com/ZacxDev/clankmail/go/hub v0.0.0-20261101200444-7db1f69acf86 h1:UammdLyLm511sLIIKxmB2KsvchpqMfZZHSoZ3b628Pw=
+github.com/ZacxDev/clankmail/go/hub v0.0.0-20261101200444-7db1f69acf86/go.mod h1:2GuD16iplA7K/5fmIY0RgC11cwWQ3Eedo5OjCGitGWI=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/google/pprof v0.0.0-20240409012703-83162a5b38cd h1:gbpYu9NMq8jhDVbvlGkMFWCjLFlqqEZjEmObmhUy6Vo=

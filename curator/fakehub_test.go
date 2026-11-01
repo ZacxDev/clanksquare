@@ -16,10 +16,10 @@ import (
 	"github.com/ZacxDev/clankmail/go/clankmail"
 )
 
-// fakeHub is a small in-memory stand-in for go/hub, enough for the curator:
-// submit (handle, channel genesis/update, msg to a channel), channel lookup,
+// fakeHub is a small in-memory stand-in for the reference hub, enough for the
+// curator: submit (handle, channel genesis/update, msg to a channel), channel lookup,
 // paged logs, handles and objects. It verifies what it is sent with the
-// reference pipeline. The real hub is exercised by go/hub's curator e2e test.
+// reference pipeline. The real hub is exercised by the e2e module (e2e/).
 type fakeHub struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -184,7 +184,7 @@ func (h *fakeHub) handleSubmit(w http.ResponseWriter, r *http.Request) {
 			hubErr(w, 404, "E_NOT_FOUND", "unknown channel")
 			return
 		}
-		// post: members — the owner is a member from genesis (as in go/hub).
+		// post: members — the owner is a member from genesis (as in the reference hub).
 		gen, _ := clankmail.Verify(h.genesis[to[0]])
 		if obj.From != gen.From {
 			hubErr(w, 403, "E_FORBIDDEN", "post policy is members")

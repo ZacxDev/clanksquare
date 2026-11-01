@@ -24,7 +24,7 @@ import (
 const Version = "0.1.0"
 
 // UserAgent is sent on every feed and hub request.
-const UserAgent = "clankmail-curator/" + Version + " (+https://github.com/ZacxDev/clankmail)"
+const UserAgent = "clanksquare-curator/" + Version + " (+https://github.com/ZacxDev/clanksquare)"
 
 const (
 	maxSubject = 200
@@ -232,8 +232,8 @@ const (
 
 // notStoredCodes are the only answers that settle a token as NOT stored, so
 // its pending record may be dropped (and the item posted again, once). Each
-// is decided by the hub after its "id already stored" check (SPEC §5; go/hub
-// submit), so a stored token can never get one, and none can turn into a
+// is decided by the hub after its "id already stored" check (SPEC §5; the
+// reference hub's submit), so a stored token can never get one, and none can turn into a
 // success for these exact bytes later:
 //
 //   - E_STALE: ts is outside ±300 s; our tokens only grow older.

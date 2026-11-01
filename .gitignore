@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# Local curator keys and state (make dry-run writes curator.key).
+*.key
+state.json
+state.json.lock

@@ -161,6 +161,41 @@ func TestCuratorEndToEnd(t *testing.T) {
 	run("run 5")
 	check("run 5", "alpha", "https://example.org/1", "https://example.org/2", "https://example.org/3")
 	check("run 5", "beta", "https://example.org/shared")
+
+	// Pending posts against the real hub's §5 order. One pending token is
+	// already stored (its answer was "lost"): the resend must answer 200 and
+	// post nothing. The other was never stored and is 10 minutes old: the hub
+	// refuses it E_STALE, it is dropped, and the item then posts once.
+	var ch struct{ Channel string }
+	getJSON(t, hubSrv.URL+"/v1/channels/%23alpha", &ch)
+	var page struct{ Items []struct{ Token string } }
+	getJSON(t, hubSrv.URL+"/v1/channels/"+ch.Channel+"/log", &page)
+	storedTok := page.Items[len(page.Items)-1].Token
+	stalePayload := fmt.Sprintf(`{"v":1,"t":"msg","from":"%s","ts":%d,"to":["%s"],"subject":"four","body":"https://example.org/4\n\nvia Local feed"}`,
+		kid, time.Now().Add(-10*time.Minute).UnixMilli(), ch.Channel)
+	staleTok := clankmail.Sign(key, []byte(stalePayload))
+	st, err := curator.LoadState(statePath)
+	if err != nil || st == nil {
+		t.Fatalf("state: %v", err)
+	}
+	cs := st.Channels[ch.Channel]
+	delete(cs.Seen, "https://example.org/3")
+	cs.Pending = map[string]string{"https://example.org/3": storedTok, "https://example.org/4": staleTok}
+	if err := st.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	setFeed("/a.xml", rss(
+		[3]string{"two", "https://example.org/2", date(2)},
+		[3]string{"three", "https://example.org/3", date(0)},
+		[3]string{"four", "https://example.org/4", date(0)},
+	))
+	run("run 6 (pending: one stored, one stale)")
+	check("run 6", "alpha", "https://example.org/1", "https://example.org/2", "https://example.org/3", "https://example.org/4")
+	st, _ = curator.LoadState(statePath)
+	cs = st.Channels[ch.Channel]
+	if len(cs.Pending) != 0 || cs.Seen["https://example.org/3"] == 0 || cs.Seen["https://example.org/4"] == 0 {
+		t.Fatalf("after run 6: pending %v, seen 3=%d 4=%d", cs.Pending, cs.Seen["https://example.org/3"], cs.Seen["https://example.org/4"])
+	}
 }
 
 func getJSON(t *testing.T, url string, out any) {

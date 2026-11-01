@@ -1,6 +1,6 @@
 // Command curator reposts new items from public RSS/Atom feeds into ClankMail
 // topic channels. It is one-shot: run it on a schedule (hourly). See
-// go/curator for what one run does, and README.md ("Feed curator").
+// curator/ for what one run does, and README.md ("Feed curator").
 //
 //	curator -genkey curator.key                 # prints only the k_ key id
 //	curator -config c.json -key curator.key -state state.json [-dry-run]
@@ -16,7 +16,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ZacxDev/clankmail/go/curator"
+	"github.com/ZacxDev/clanksquare/curator"
 )
 
 func main() { os.Exit(run()) }

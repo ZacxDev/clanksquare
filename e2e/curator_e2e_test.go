@@ -1,4 +1,7 @@
-package hub
+// Package e2e runs the curator against the real ClankMail reference hub
+// (github.com/ZacxDev/clankmail/go/hub). It is its own module so the hub's
+// SQLite dependencies stay out of the curator's module.
+package e2e
 
 import (
 	"bytes"
@@ -16,19 +19,20 @@ import (
 	"time"
 
 	"github.com/ZacxDev/clankmail/go/clankmail"
-	"github.com/ZacxDev/clankmail/go/curator"
+	"github.com/ZacxDev/clankmail/go/hub"
+	"github.com/ZacxDev/clanksquare/curator"
 )
 
-// TestCuratorEndToEnd runs the feed curator (go/curator) against this real
-// hub and a local feed server, on the real clock. It is the end-to-end check
-// that state is only a cache: deleting it must not repost anything.
+// TestCuratorEndToEnd runs the feed curator (curator/) against the real
+// reference hub and a local feed server, on the real clock. It is the
+// end-to-end check that state is only a cache: deleting it must not repost anything.
 func TestCuratorEndToEnd(t *testing.T) {
-	store, err := OpenSQLite(filepath.Join(t.TempDir(), "hub.db"))
+	store, err := hub.OpenSQLite(filepath.Join(t.TempDir(), "hub.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	h, err := New(Config{Name: hubName, Store: store})
+	h, err := hub.New(hub.Config{Name: hubName, Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +201,9 @@ func TestCuratorEndToEnd(t *testing.T) {
 		t.Fatalf("after run 6: pending %v, seen 3=%d 4=%d", cs.Pending, cs.Seen["https://example.org/3"], cs.Seen["https://example.org/4"])
 	}
 }
+
+// hubName is the hub's name for this test; signed handle objects carry it.
+const hubName = "hub.example"
 
 func getJSON(t *testing.T, url string, out any) {
 	t.Helper()

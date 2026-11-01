@@ -21,6 +21,10 @@ func TestStripHTML(t *testing.T) {
 		{"unterminated <a href=", "unterminated"},
 		{"<script>never closed", ""},
 		{"bad utf8 \xff\xfe end", "bad utf8 � end"},
+		// Lowercasing changes byte lengths here (Kelvin sign 3 -> 1, İ 2 -> 3):
+		// the close-tag search must not use offsets from a lowered copy.
+		{"<script>\u212A\u212A</script>ok", "ok"},
+		{"<style>\u0130</STYLE>after", "after"},
 	}
 	for _, c := range cases {
 		if got := StripHTML(c.in); got != c.want {

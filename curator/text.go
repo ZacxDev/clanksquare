@@ -84,8 +84,29 @@ func tagName(inside string) string {
 	return strings.ToLower(inside)
 }
 
+// indexFold is strings.Index with ASCII case folding. sub must be ASCII (a
+// close tag). It returns an offset into s itself: lowering s first would
+// not, because strings.ToLower changes byte lengths (the Kelvin sign, İ,
+// invalid UTF-8) and its offsets would then point into the wrong place.
 func indexFold(s, sub string) int {
-	return strings.Index(strings.ToLower(s), strings.ToLower(sub))
+	n := len(sub)
+outer:
+	for i := 0; i+n <= len(s); i++ {
+		for j := 0; j < n; j++ {
+			if asciiLower(s[i+j]) != asciiLower(sub[j]) {
+				continue outer
+			}
+		}
+		return i
+	}
+	return -1
+}
+
+func asciiLower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 'a' - 'A'
+	}
+	return c
 }
 
 // PlainText normalises text that is already plain: invalid UTF-8 replaced,

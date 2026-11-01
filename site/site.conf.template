@@ -1,7 +1,7 @@
 # Rendered at start by the image's envsubst entrypoint into /tmp/site.conf.
 # Only defined environment variables are substituted; here that is
 # HUB_UPSTREAM: the hub's base URL, scheme://host[:port] with no path and no
-# trailing slash (https://clankmail.zacx.dev, or an in-cluster address).
+# trailing slash (https://clankmail.zacx.dev, or a closer address of the same hub).
 
 # A short cache in front of the hub: every page view asks for the same list,
 # and the hub rate-limits per client address, which is this proxy's.

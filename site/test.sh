@@ -92,6 +92,7 @@ check '! grep -q "__HUB_URL__" "$B"' "no placeholder left in the served page"
 check '[ "$(hdr X-Content-Type-Options)" = nosniff ]' "X-Content-Type-Options: nosniff"
 check '[ "$(hdr Referrer-Policy)" = no-referrer ]' "Referrer-Policy: no-referrer"
 check '[ "$(hdr X-Frame-Options)" = DENY ]' "X-Frame-Options: DENY"
+check '[ "$(hdr Cache-Control)" = no-transform ]' "Cache-Control: no-transform (Cloudflare must not inject its beacon)"
 check '! grep -qi "^set-cookie:" "$H"' "GET / sets no cookie"
 check '! grep -qi "^access-control-" "$H"' "the site itself sends no CORS headers"
 

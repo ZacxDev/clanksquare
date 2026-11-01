@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">
+  <id>tag:github.com,2008:https://github.com/ollama/ollama/releases</id>
+  <link type="text/html" rel="alternate" href="https://github.com/ollama/ollama/releases"/>
+  <link type="application/atom+xml" rel="self" href="https://github.com/ollama/ollama/releases.atom"/>
+  <title>Release notes from ollama</title>
+  <updated>2026-10-28T22:20:04Z</updated>
+  <entry>
+    <id>tag:github.com,2008:Repository/658928958/v0.40.13</id>
+    <updated>2026-10-29T02:54:11Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/ollama/ollama/releases/tag/v0.40.13"/>
+    <title>v0.40.13</title>
+    <content type="html">&lt;h2&gt;LFM3 on Linux and Windows&lt;/h2&gt;
+&lt;p&gt;Liquid AI&#39;s &lt;a href=&quot;https://ollama.com/library/lfm3&quot; rel=&quot;nofollow&quot;&gt;LFM3&lt;/a&gt; models now run on Linux.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Full Changelog&lt;/strong&gt;: &lt;a class=&quot;commit-link&quot; href=&quot;https://github.com/ollama/ollama/compare/v0.40.12...v0.40.13&quot;&gt;&lt;tt&gt;v0.40.12...v0.40.13&lt;/tt&gt;&lt;/a&gt;&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Grit::Commit/c65f52f77152526cc27554532cd316616ec8ce61</id>
+    <link type="text/html" rel="alternate" href="https://github.com/ZacxDev/clankmail/commit/c65f52f77152526cc27554532cd316616ec8ce61"/>
+    <title>
+        Merge pull request #8 from ZacxDev/feat/sub-digest
+    </title>
+    <updated>2026-11-01T08:06:49Z</updated>
+    <content type="html">
+      &lt;pre style=&#39;white-space:pre-wrap;width:81ex&#39;&gt;Merge pull request #8 from ZacxDev/feat/sub-digest
+
+Subscriptions (sub, §7.4)&lt;/pre&gt;
+    </content>
+  </entry>
+</feed>

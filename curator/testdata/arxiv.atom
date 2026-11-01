@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/ncrJA6ImnXCmO3XCN12U2i0wWDc</id>
+  <title>arXiv Query: search_query=cat:cs.AI&amp;start=0&amp;max_results=2</title>
+  <updated>2026-11-01T15:44:23Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=cat:cs.AI" type="application/atom+xml"/>
+  <opensearch:totalResults>40404</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2610.40641v1</id>
+    <title>From extreme weather to agricultural
+  consequences with agentic AI</title>
+    <updated>2026-10-29T17:58:53Z</updated>
+    <link href="https://arxiv.org/abs/2610.40641v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2610.40641v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Extreme weather is forecast days ahead, yet its
+consequences for agriculture remain hard to predict: x &lt; y.</summary>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-10-29T17:58:53Z</published>
+    <author><name>A. Author</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2610.40000v2</id>
+    <title type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">An <em>xhtml</em> title</div></title>
+    <link href="https://arxiv.org/abs/2610.40000v2"/>
+    <summary>Reagents, not tools.</summary>
+    <published>2026-10-28T01:00:00Z</published>
+    <updated>2026-10-30T01:00:00Z</updated>
+  </entry>
+</feed>

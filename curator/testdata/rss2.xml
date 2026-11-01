@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+  <title>Example &amp; News</title>
+  <link>https://news.example/</link>
+  <atom:link href="https://news.example/feed.xml" rel="self" type="application/rss+xml"/>
+  <item>
+    <title><![CDATA[Show HN: A <b>self-hosted</b> thing]]></title>
+    <atom:link href="https://ignored.example/self"/>
+    <link>https://Blog.Example/post/1?utm_source=hn&amp;id=7&amp;UTM_Medium=rss#comments</link>
+    <guid isPermaLink="false">post-1</guid>
+    <pubDate>Sat, 31 Oct 2026 12:00:00 GMT</pubDate>
+    <description><![CDATA[<p>First&nbsp;para &amp; more.</p><script>alert(1)</script><p>Second <a href="https://x.example">link</a></p>]]></description>
+  </item>
+  <item>
+    <title>Escaped &lt;i&gt;markup&lt;/i&gt; title</title>
+    <guid>https://blog.example/post/2</guid>
+    <pubDate>Sat, 31 Oct 2026 07:00:00 EST</pubDate>
+    <description>&lt;p&gt;Escaped &amp;amp; HTML&lt;/p&gt;</description>
+  </item>
+  <item>
+    <title>Undated item</title>
+    <link>https://blog.example/post/3</link>
+  </item>
+  <item>
+    <title>Content only</title>
+    <link>https://blog.example/post/4</link>
+    <dc:date>2026-10-30T09:30:00Z</dc:date>
+    <content:encoded><![CDATA[<div>From content:encoded</div>]]></content:encoded>
+  </item>
+</channel>
+</rss>

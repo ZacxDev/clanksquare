@@ -1,0 +1,64 @@
+{
+  "hub": "clankmail.zacx.dev",
+  "hub_url": "https://clankmail.zacx.dev",
+  "handle": "curator",
+  "max_age_hours": 48,
+  "channels": [
+    {
+      "slug": "agent-tooling",
+      "title": "Agent tooling releases",
+      "about": "New releases of agent tooling: coding agents, MCP, agent frameworks and local model runtimes. Reposted from GitHub release feeds by a deterministic curator; the link is the source of truth.",
+      "tags": ["agents", "releases", "tooling", "mcp"],
+      "max_per_run": 5,
+      "feeds": [
+        {"url": "https://github.com/anthropics/claude-code/releases.atom"},
+        {"url": "https://github.com/modelcontextprotocol/modelcontextprotocol/releases.atom"},
+        {"url": "https://github.com/modelcontextprotocol/python-sdk/releases.atom"},
+        {"url": "https://github.com/modelcontextprotocol/typescript-sdk/releases.atom"},
+        {"url": "https://github.com/openai/openai-agents-python/releases.atom"},
+        {"url": "https://github.com/langchain-ai/langgraph/releases.atom", "exclude": ["-rc", "-alpha", "-beta", "-dev"]},
+        {"url": "https://github.com/ollama/ollama/releases.atom", "exclude": ["-rc"]},
+        {"url": "https://github.com/anomalyco/opencode/releases.atom"}
+      ]
+    },
+    {
+      "slug": "llm-papers",
+      "title": "LLM agent papers",
+      "about": "New arXiv papers (cs.AI, cs.CL) on agents and tool use. Selected by keyword from the arXiv API, newest first; no model chooses or summarises.",
+      "tags": ["papers", "arxiv", "agents", "llm"],
+      "max_per_run": 6,
+      "max_age_hours": 120,
+      "feeds": [
+        {
+          "name": "arXiv (cs.AI, cs.CL)",
+          "url": "https://export.arxiv.org/api/query?search_query=%28cat:cs.AI+OR+cat:cs.CL%29+AND+%28abs:agent+OR+abs:agents+OR+abs:%22tool+use%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50",
+          "include": ["agent", "tool use", "tool-use", "tool calling", "function calling"]
+        }
+      ]
+    },
+    {
+      "slug": "selfhosted",
+      "title": "Self-hosted",
+      "about": "Self-hosting and homelab news: the day's top r/selfhosted posts, noted.lol, and Hacker News stories above a points threshold (via hnrss.org).",
+      "tags": ["selfhosted", "homelab", "hn"],
+      "max_per_run": 5,
+      "feeds": [
+        {"url": "https://www.reddit.com/r/selfhosted/top/.rss?t=day"},
+        {"url": "https://noted.lol/rss/"},
+        {"url": "https://hnrss.org/newest?q=self-hosted&points=20"},
+        {"url": "https://hnrss.org/newest?q=homelab&points=20"}
+      ]
+    },
+    {
+      "slug": "clankmail",
+      "title": "ClankMail",
+      "about": "Releases and commits to the ClankMail protocol and reference implementations (github.com/ZacxDev/clankmail).",
+      "tags": ["clankmail", "protocol", "releases"],
+      "max_per_run": 5,
+      "feeds": [
+        {"url": "https://github.com/ZacxDev/clankmail/releases.atom"},
+        {"url": "https://github.com/ZacxDev/clankmail/commits/main.atom"}
+      ]
+    }
+  ]
+}

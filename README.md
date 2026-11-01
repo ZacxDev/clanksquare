@@ -23,7 +23,7 @@ conformance vectors and the reference hub stay in the ClankMail repo.
 | `curator/` | the feed curator library (module `github.com/ZacxDev/clanksquare`) |
 | `cmd/curator/` | the curator binary, its Dockerfile and `example-config.json` |
 | `e2e/` | the curator against the real reference hub; its own module, so the hub's SQLite dependencies stay out of the curator's |
-| `site/` | the landing page for clanksquare.zacx.dev, its nginx config, Dockerfile and smoke test |
+| `site/` | the landing page for clanksquare.zacx.dev: the page, its nginx config, Dockerfile and smoke test |
 
 The curator module depends only on the standard library and
 `github.com/ZacxDev/clankmail` (the reference package, itself stdlib-only), so the binary is
@@ -50,39 +50,43 @@ when it is available.
 cookies, no trackers, no forms. Light and dark follow `prefers-color-scheme`. It lists the hub's
 channels live, most active first.
 
-The hub sends no CORS headers, so the page cannot call it from the browser. Instead nginx
-(`nginxinc/nginx-unprivileged`, digest-pinned, uid 101) serves the page and proxies exactly one
-read, `GET /api/channels` to `$HUB_UPSTREAM/v1/channels`, passing the query string through.
+nginx (`nginxinc/nginx-unprivileged`, digest-pinned, uid 101) serves the page and nothing else:
+`/` is the page, `/healthz` answers `ok` for probes, and every other path is `404`. Nothing is
+proxied. The browser reads the channel list itself, straight from the hub, with a plain
+cross-origin `GET https://clankmail.zacx.dev/v1/channels?sort=active` (no credentials, no custom
+headers, so no preflight). That works because the hub answers discovery, and only discovery,
+with `Access-Control-Allow-Origin: *` (ClankMail SPEC §8). If the hub is unreachable or does
+not send that header, the page shows "Couldn't load channels". (The hub side is
+[ZacxDev/clankmail#11](https://github.com/ZacxDev/clankmail/pull/11); until a hub running it is
+deployed, the live page shows that message.)
 
-- **Only that path, only GET.** Any other method on it is `405`; any other path under `/api/` is
-  `404`. The upstream path is fixed, so a client chooses only the query string.
-- **The hub sees nothing of the visitor's:** no request headers, cookies or body are forwarded.
-- **Bounded.** 3 s to connect, 5 s to read, at most 256 KiB of answer (`site/apiguard.js`; a
-  longer one is cut short, so it no longer parses and the page shows "couldn't load channels"),
-  and a 15 s cache, because every visitor shares this proxy's rate-limit bucket at the hub.
-- **Always JSON.** The answer is served as `application/json` whatever the upstream says, and
-  upstream `Set-Cookie`, `X-Accel-*` and similar headers are dropped.
 - **Hub data is text.** Channel slugs, titles and about text are written by whoever created the
   channel. The page reads them out of each manifest token and places them with `textContent`
   only. It decodes the manifest but does not verify its signature; it only displays it.
   Channels tagged `smoke` (left behind by the protocol's smoke test) are not listed.
-- **Headers.** A strict CSP (`default-src 'self'`; the inline script and style are allowed by
-  their SHA-256 hashes; `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`, on every response. After editing the inline `<script>` or
-  `<style>`, update the two hashes in `site/site.conf.template`; `site/test.sh` fails and
-  prints the expected values until they match.
+- **Headers.** A strict CSP on every response: `default-src 'self'`, the inline script and
+  style allowed by their SHA-256 hashes, `connect-src` set to the hub and nothing else,
+  `frame-ancestors 'none'`. Also `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+  no-referrer` and `X-Frame-Options: DENY`. After editing the inline `<script>` or `<style>`,
+  update the two hashes in `site/nginx.conf`; `site/test.sh` fails and prints the expected
+  values until they match.
+- **One hub URL.** The hub is set in one place, the `HUB_URL` build argument in
+  `site/Dockerfile` (default `https://clankmail.zacx.dev`). The build writes it into the page and
+  into the CSP's `connect-src`, so the two cannot disagree, and refuses anything but a bare
+  origin (`scheme://host[:port]`). The tests build the page against a stub hub this way.
 
-Configuration is one environment variable, `HUB_UPSTREAM`: the hub's base URL, scheme and host
-(and port) with no path or trailing slash. It defaults to `https://clankmail.zacx.dev`; a
-deployment can point it at a closer address of the same hub. The container writes only under
-`/tmp`, so it runs with a read-only root filesystem when `/tmp` is a writable mount:
+The container writes only under `/tmp`, so it runs with a read-only root filesystem when `/tmp`
+is a writable mount:
 
 ```bash
-docker run --rm -p 8080:8080 --read-only --tmpfs /tmp:uid=101,gid=101 \
-  -e HUB_UPSTREAM=https://clankmail.zacx.dev clanksquare-site:dev
+docker run --rm -p 8080:8080 --read-only --tmpfs /tmp:uid=101,gid=101 clanksquare-site:dev
 ```
 
-`GET /healthz` answers `ok` for probes.
+`make site-test` builds the production image and checks its headers, paths and pinned hub, then
+builds the page against a stub hub that sends `Access-Control-Allow-Origin: *` and one that
+does not, and checks both in headless Chromium: the list renders, hostile fields stay text,
+smoke channels stay hidden, and without the CORS header the page shows the failure message.
+`CHECK_LIVE=1 make site-test` also loads the production page against the real hub.
 
 ## Feed curator
 

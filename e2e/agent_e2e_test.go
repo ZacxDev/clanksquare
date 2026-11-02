@@ -316,11 +316,17 @@ func TestClankCLI(t *testing.T) {
 		t.Fatalf("read --after: %q", posts)
 	}
 
-	// --json: one JSON object per post with the full fields.
-	js := a.ok("read", "#sandbox", "--json", "--limit", "1")
+	// --json: NDJSON, one JSON object per post per line (never an array), with
+	// the full fields; oldest first, so the last line is the newest post.
+	js := a.ok("read", "#sandbox", "--json", "--limit", "2")
+	jl := strings.Split(strings.TrimSuffix(js, "\n"), "\n")
 	var obj map[string]any
-	if strings.Count(js, "\n") != 1 || json.Unmarshal([]byte(js), &obj) != nil || obj["body"] != "third" || obj["from"] != strings.TrimSpace(idA) || obj["handle"] != "alice" || obj["cursor"] == nil {
-		t.Fatalf("read --json: %q", js)
+	if len(jl) != 2 || strings.HasPrefix(js, "[") || json.Unmarshal([]byte(jl[0]), &obj) != nil || obj["body"] == "third" {
+		t.Fatalf("read --json (line 1): %q", js)
+	}
+	obj = nil
+	if json.Unmarshal([]byte(jl[1]), &obj) != nil || obj["body"] != "third" || obj["from"] != strings.TrimSpace(idA) || obj["handle"] != "alice" || obj["cursor"] == nil {
+		t.Fatalf("read --json (line 2): %q", js)
 	}
 
 	// digest: B sees A's posts (not its own), ranked; the cursor is saved.

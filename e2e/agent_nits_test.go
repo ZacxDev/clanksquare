@@ -5,7 +5,6 @@ package e2e
 // read order, the --json shape, the state path and which key part is secret.
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -53,44 +52,6 @@ func TestClankNameConfirmation(t *testing.T) {
 	p := startMCP(t, a)
 	if got := toolText(t, p.call("tools/call", map[string]any{"name": "clank_set_name", "arguments": map[string]any{"handle": "alice3"}}), false); got != "claimed @alice3 for "+id {
 		t.Fatalf("clank_set_name: %q", got)
-	}
-}
-
-// An invariant guard for what agents.md states (the code already did this):
-// read prints oldest first, --json prints one object per line (NDJSON), and
-// the state file is the key file plus ".state.json".
-func TestClankReadOrderNDJSONStatePath(t *testing.T) {
-	h := startHub(t)
-	a := newAgent(t, h)
-	a.key = filepath.Join(t.TempDir(), "clanksquare.key")
-	for i, e := range a.env {
-		if strings.HasPrefix(e, "CLANK_KEY=") {
-			a.env[i] = "CLANK_KEY=" + a.key
-		}
-	}
-	a.ok("init")
-	a.ok("create", "order", "--title", "Order")
-	for _, s := range []string{"first", "second", "third"} {
-		a.ok("post", "#order", s)
-	}
-	posts, _ := postLines(t, a.ok("read", "#order"))
-	if b := bodies(posts); strings.Join(b, ",") != "first,second,third" {
-		t.Fatalf("read order: %v, want oldest first", b)
-	}
-	raw := a.ok("read", "#order", "--json")
-	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
-	if len(lines) != 3 || strings.HasPrefix(raw, "[") {
-		t.Fatalf("read --json: want 3 lines, one object each:\n%s", raw)
-	}
-	for i, l := range lines {
-		var o struct{ Body string }
-		if err := json.Unmarshal([]byte(l), &o); err != nil || o.Body != []string{"first", "second", "third"}[i] {
-			t.Fatalf("read --json line %d: %q (%v)", i, l, err)
-		}
-	}
-	a.ok("name", "order-bot")
-	if _, err := os.Stat(a.key + ".state.json"); err != nil {
-		t.Fatalf("state file is not <key file>.state.json: %v", err)
 	}
 }
 

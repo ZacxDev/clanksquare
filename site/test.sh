@@ -153,11 +153,18 @@ for bad in "k_short" "$LAUNCH_KEY," "$LAUNCH_KEY,,$LAUNCH_KEY" "K_ILDI4GC4CZOEGA
 done
 
 # ── the hosted MCP sidecar, through the site's nginx ───────────────
-mcp_rpc() { # mcp_rpc <base> <json>
-  get -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data "$2" "$1/mcp"
+# MCP 2026-07-28: every request carries _meta (protocol version, client
+# capabilities) and the MCP-Protocol-Version / Mcp-Method (/ Mcp-Name) headers.
+MCP_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+mcp_rpc() { # mcp_rpc <base> <method> <json> [Mcp-Name]
+  local extra=()
+  [ -n "${4:-}" ] && extra=(-H "Mcp-Name: $4")
+  get -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -H 'MCP-Protocol-Version: 2026-07-28' -H "Mcp-Method: $2" "${extra[@]}" --data "$3" "$1/mcp"
 }
+DISCOVER='{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{'"$MCP_META"'}}'
 # Negative control: before the sidecar runs, /mcp is nginx's 502.
-code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":1,"method":"ping"}')"
+code="$(mcp_rpc "$base" server/discover "$DISCOVER")"
 check '[ "$code" = 502 ]' "POST /mcp with no sidecar running is 502 (got $code)"
 docker build -q -f "$root/site/Dockerfile" --target mcp -t "$mcp_image" "$root" >/dev/null
 mcp_name="$id-mcp"
@@ -165,25 +172,27 @@ containers+=("$mcp_name")
 docker run -d --name "$mcp_name" --read-only --cap-drop ALL --security-opt no-new-privileges \
   --network "container:$id-prod" "$mcp_image" >/dev/null
 for _ in $(seq 1 50); do
-  [ "$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":1,"method":"ping"}')" = 200 ] && break; sleep 0.2
+  [ "$(mcp_rpc "$base" server/discover "$DISCOVER")" = 200 ] && break; sleep 0.2
 done
-code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}')"
-check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"protocolVersion\"]==\"2025-11-25\" and r[\"serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp initialize reaches the sidecar (got $code: $(head -c 120 "$B"))"
+code="$(mcp_rpc "$base" server/discover "$DISCOVER")"
+check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"resultType\"]==\"complete\" and r[\"supportedVersions\"]==[\"2026-07-28\"] and r[\"_meta\"][\"io.modelcontextprotocol/serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp server/discover reaches the sidecar (got $code: $(head -c 120 "$B"))"
 check '[[ "$(hdr Content-Type)" == application/json* ]] && [ "$(hdr Cache-Control)" = no-transform ] && [ -n "$(hdr Content-Security-Policy)" ]' "  ... JSON, with the site's headers"
-code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')"
+code="$(mcp_rpc "$base" tools/list '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{'"$MCP_META"'}}')"
 check '[ "$code" = 200 ] && [ "$(python3 -c "import json,sys; print(\" \".join(t[\"name\"] for t in json.load(open(sys.argv[1]))[\"result\"][\"tools\"]))" "$B")" = "clank_channels clank_read" ]' "the hosted MCP lists only clank_channels and clank_read ($(head -c 200 "$B" | tr -d '\n'))"
-code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"clank_post","arguments":{"channel":"#x","text":"x"}}}')"
+code="$(mcp_rpc "$base" tools/call '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"clank_post","arguments":{"channel":"#x","text":"x"},'"$MCP_META"'}}' clank_post)"
 check '[ "$code" = 200 ] && grep -q "\"code\":-32602" "$B"' "the hosted MCP refuses clank_post as an unknown tool"
+# The Mcp-Method header reaches the sidecar through nginx: a mismatch is its 400 HeaderMismatch.
+code="$(mcp_rpc "$base" tools/list "$DISCOVER")"
+check '[ "$code" = 400 ] && grep -q "\"code\":-32020" "$B"' "an Mcp-Method that does not match the body is 400 HeaderMismatch through nginx (got $code)"
 # The server-wide body limit is 1k; /mcp raises it to 16k. A 4 KB request
 # passes (so the raise applies), a 20 KB one is refused.
-mid="$(python3 -c 'import json; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"ping","params":{"pad":"x"*4000}}))')"
-code="$(mcp_rpc "$base" "$mid")"
-check '[ "$code" = 200 ] && grep -q "\"result\":{}" "$B"' "a 4 KB POST /mcp is answered (got $code)"
-big="$(python3 -c 'import json; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"ping","params":{"pad":"x"*20000}}))')"
-code="$(mcp_rpc "$base" "$big")"
+pad() { python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"server/discover","params":{"pad":"x"*int(sys.argv[1]),"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}))' "$1"; }
+code="$(mcp_rpc "$base" server/discover "$(pad 4000)")"
+check '[ "$code" = 200 ] && grep -q "\"supportedVersions\"" "$B"' "a 4 KB POST /mcp is answered (got $code)"
+code="$(mcp_rpc "$base" server/discover "$(pad 20000)")"
 check '[ "$code" = 413 ]' "a 20 KB POST /mcp is refused 413 (got $code)"
 code="$(get "$base/mcp")"
-check '[ "$code" = 405 ]' "GET /mcp is 405: no SSE stream (got $code)"
+check '[ "$code" = 405 ]' "GET /mcp is 405: no GET stream (got $code)"
 
 # ── stub hubs ───────────────────────────────────────────────────────
 XSS='<img src=x onerror=alert(1)>'

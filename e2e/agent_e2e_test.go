@@ -442,7 +442,28 @@ func startMCP(t *testing.T, a *agent) *mcpProc {
 
 var mcpID float64
 
-func (p *mcpProc) call(method string, params any) map[string]any {
+const mcpVersion = "2026-07-28"
+
+// withMeta adds the per-request _meta every MCP 2026-07-28 request carries.
+func withMeta(params map[string]any) map[string]any {
+	out := map[string]any{"_meta": map[string]any{
+		"io.modelcontextprotocol/protocolVersion":    mcpVersion,
+		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+		"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "e2e", "version": "0"},
+	}}
+	for k, v := range params {
+		out[k] = v
+	}
+	return out
+}
+
+// call sends a request with the standard _meta; callRaw sends params as given.
+func (p *mcpProc) call(method string, params map[string]any) map[string]any {
+	p.t.Helper()
+	return p.callRaw(method, withMeta(params))
+}
+
+func (p *mcpProc) callRaw(method string, params any) map[string]any {
 	p.t.Helper()
 	mcpID++
 	id := mcpID
@@ -463,10 +484,7 @@ func (p *mcpProc) call(method string, params any) map[string]any {
 
 func toolText(t *testing.T, resp map[string]any, wantErr bool) string {
 	t.Helper()
-	res, _ := resp["result"].(map[string]any)
-	if res == nil {
-		t.Fatalf("no result: %v", resp)
-	}
+	res := completeResult(t, resp)
 	content, _ := res["content"].([]any)
 	if len(content) != 1 || res["isError"] != wantErr {
 		t.Fatalf("want isError=%v and one content item, got %v", wantErr, res)
@@ -474,10 +492,75 @@ func toolText(t *testing.T, resp map[string]any, wantErr bool) string {
 	return content[0].(map[string]any)["text"].(string)
 }
 
+// completeResult returns a response's result, which must carry resultType
+// "complete" and the server's identity in _meta (MCP 2026-07-28 basic/index).
+func completeResult(t *testing.T, resp map[string]any) map[string]any {
+	t.Helper()
+	res, _ := resp["result"].(map[string]any)
+	if res == nil {
+		t.Fatalf("no result: %v", resp)
+	}
+	meta, _ := res["_meta"].(map[string]any)
+	si, _ := meta["io.modelcontextprotocol/serverInfo"].(map[string]any)
+	if res["resultType"] != "complete" || si["name"] != "clanksquare" {
+		t.Fatalf("result without resultType complete / serverInfo: %v", res)
+	}
+	return res
+}
+
+// rpcErr returns a response's error code and data.
+func rpcErr(t *testing.T, resp map[string]any) (float64, map[string]any) {
+	t.Helper()
+	e, _ := resp["error"].(map[string]any)
+	if e == nil {
+		t.Fatalf("want an error, got %v", resp)
+	}
+	d, _ := e["data"].(map[string]any)
+	return e["code"].(float64), d
+}
+
+// checkProtocolGuards: the version rules of MCP 2026-07-28 that both
+// transports share. send posts one request with the given params.
+func checkProtocolGuards(t *testing.T, send func(method string, params any) map[string]any) {
+	t.Helper()
+	// server/discover (MUST): versions, capabilities, identity, cache hints.
+	d := completeResult(t, send("server/discover", withMeta(nil)))
+	if v, _ := d["supportedVersions"].([]any); len(v) != 1 || v[0] != mcpVersion || d["capabilities"].(map[string]any)["tools"] == nil || d["ttlMs"] == nil || d["cacheScope"] != "public" {
+		t.Fatalf("server/discover: %v", d)
+	}
+	// An unsupported version: -32022 listing what is supported.
+	old := withMeta(nil)
+	old["_meta"].(map[string]any)["io.modelcontextprotocol/protocolVersion"] = "2025-11-25"
+	if code, data := rpcErr(t, send("tools/list", old)); code != -32022 || fmt.Sprint(data["supported"]) != "[2026-07-28]" || data["requested"] != "2025-11-25" {
+		t.Fatalf("old version: %v %v", code, data)
+	}
+	// No _meta at all: malformed, -32602.
+	if code, _ := rpcErr(t, send("tools/list", map[string]any{})); code != -32602 {
+		t.Fatalf("missing _meta: %v", code)
+	}
+	// _meta without clientCapabilities: also malformed.
+	noCaps := map[string]any{"_meta": map[string]any{"io.modelcontextprotocol/protocolVersion": mcpVersion}}
+	if code, _ := rpcErr(t, send("tools/list", noCaps)); code != -32602 {
+		t.Fatalf("missing clientCapabilities: %v", code)
+	}
+	// A legacy initialize is refused, naming the supported version.
+	if code, data := rpcErr(t, send("initialize", map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}})); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28]" {
+		t.Fatalf("initialize: %v %v", code, data)
+	}
+	// ping was removed in this revision.
+	if code, _ := rpcErr(t, send("ping", withMeta(nil))); code != -32601 {
+		t.Fatalf("ping: %v", code)
+	}
+}
+
 func toolNames(t *testing.T, resp map[string]any) []string {
 	t.Helper()
+	res := completeResult(t, resp)
+	if res["ttlMs"] == nil || res["cacheScope"] != "public" {
+		t.Fatalf("tools/list without ttlMs/cacheScope: %v", res)
+	}
 	var names []string
-	for _, x := range resp["result"].(map[string]any)["tools"].([]any) {
+	for _, x := range res["tools"].([]any) {
 		names = append(names, x.(map[string]any)["name"].(string))
 	}
 	return names
@@ -488,13 +571,10 @@ func TestClankMCPStdio(t *testing.T) {
 	a := newAgent(t, h)
 	p := startMCP(t, a)
 
-	init := p.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "test", "version": "0"}})
-	res := init["result"].(map[string]any)
-	if res["protocolVersion"] != "2025-06-18" || res["serverInfo"].(map[string]any)["name"] != "clanksquare" {
-		t.Fatalf("initialize: %v", init)
-	}
-	p.in.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"))
-	if got := strings.Join(toolNames(t, p.call("tools/list", map[string]any{})), " "); got != "clank_channels clank_read clank_join clank_post clank_create_channel clank_subscribe clank_digest clank_whoami clank_set_name" {
+	checkProtocolGuards(t, func(method string, params any) map[string]any { return p.callRaw(method, params) })
+	// A notification gets no response (checked at the end: no stray output).
+	p.in.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}` + "\n"))
+	if got := strings.Join(toolNames(t, p.call("tools/list", nil)), " "); got != "clank_channels clank_read clank_join clank_post clank_create_channel clank_subscribe clank_digest clank_whoami clank_set_name" {
 		t.Fatalf("tools: %s", got)
 	}
 	tool := func(name string, args map[string]any, wantErr bool) string {
@@ -563,7 +643,7 @@ func startHTTPMCP(t *testing.T, a *agent, extra ...string) string {
 	}
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
 	line, err := bufio.NewReader(errp).ReadString('\n')
-	m := regexp.MustCompile(`listening on (http://127\.0\.0\.1:\d+/mcp) \(read-only`).FindStringSubmatch(line)
+	m := regexp.MustCompile(`listening on (http://127\.0\.0\.1:\d+/mcp) \(no write tools`).FindStringSubmatch(line)
 	if err != nil || m == nil {
 		t.Fatalf("mcp-http did not start: %q %v", line, err)
 	}
@@ -571,9 +651,20 @@ func startHTTPMCP(t *testing.T, a *agent, extra ...string) string {
 	return m[1]
 }
 
-func postRPC(t *testing.T, url string, body []byte) (int, map[string]any) {
+// postRPC posts a raw body with the given headers (nil: the standard
+// MCP 2026-07-28 headers for that body, derived from it).
+func postRPC(t *testing.T, url string, body []byte, headers map[string]string) (int, map[string]any) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if headers == nil {
+		headers = stdHeaders(body)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,10 +674,36 @@ func postRPC(t *testing.T, url string, body []byte) (int, map[string]any) {
 	return resp.StatusCode, m
 }
 
-func rpc(t *testing.T, url string, id int, method string, params any) map[string]any {
-	t.Helper()
+// stdHeaders mirrors the body into MCP-Protocol-Version, Mcp-Method and,
+// for tools/call, Mcp-Name, as a conforming client does.
+func stdHeaders(body []byte) map[string]string {
+	var msg struct {
+		Method string
+		Params struct {
+			Name string
+			Meta map[string]any `json:"_meta"`
+		}
+	}
+	json.Unmarshal(body, &msg)
+	h := map[string]string{"Mcp-Method": msg.Method}
+	if v, ok := msg.Params.Meta["io.modelcontextprotocol/protocolVersion"].(string); ok {
+		h["MCP-Protocol-Version"] = v
+	}
+	if msg.Method == "tools/call" {
+		h["Mcp-Name"] = msg.Params.Name
+	}
+	return h
+}
+
+func rpcBody(id int, method string, params any) []byte {
 	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-	code, m := postRPC(t, url, b)
+	return b
+}
+
+// rpc sends a well-formed request (standard _meta and headers); want 200.
+func rpc(t *testing.T, url string, id int, method string, params map[string]any) map[string]any {
+	t.Helper()
+	code, m := postRPC(t, url, rpcBody(id, method, withMeta(params)), nil)
 	if code != 200 {
 		t.Fatalf("%s: HTTP %d %v", method, code, m)
 	}
@@ -600,19 +717,31 @@ func TestClankMCPHTTPReadOnly(t *testing.T) {
 	a.ok("create", "public-room", "--title", "Public room")
 	a.ok("post", "#public-room", "readable over http")
 
-	// It refuses to start without --read-only.
-	if r := a.run("mcp-http", "--port", "0"); r.code != 2 || !strings.HasPrefix(r.err, "error: E_USAGE: mcp-http only runs with --read-only") {
-		t.Fatalf("mcp-http without --read-only: %+v", r)
-	}
 	// The hosted server gets no key: point CLANK_KEY at a path that must stay absent.
 	srv := &agent{t: t, env: append(os.Environ(), "CLANK_HUB="+h.URL, "CLANK_HUB_NAME="+hubName, "CLANK_KEY="+filepath.Join(t.TempDir(), "must-not-exist"))}
-	url := startHTTPMCP(t, srv, "--read-only")
+	url := startHTTPMCP(t, srv, "--allow-origin", "https://allowed.example")
 
-	if res := rpc(t, url, 1, "initialize", map[string]any{"protocolVersion": "2025-11-25"})["result"].(map[string]any); res["protocolVersion"] != "2025-11-25" {
-		t.Fatalf("initialize: %v", res)
-	}
+	// The shared version rules, plus the HTTP status each one carries.
+	checkProtocolGuards(t, func(method string, params any) map[string]any {
+		code, m := postRPC(t, url, rpcBody(1, method, params), nil)
+		e, _ := m["error"].(map[string]any)
+		want := 200
+		if e != nil {
+			switch e["code"] {
+			case float64(-32601):
+				want = 404
+			default:
+				want = 400
+			}
+		}
+		if code != want {
+			t.Fatalf("%s: HTTP %d for %v, want %d", method, code, m, want)
+		}
+		return m
+	})
+
 	if got := strings.Join(toolNames(t, rpc(t, url, 2, "tools/list", nil)), " "); got != "clank_channels clank_read" {
-		t.Fatalf("read-only tools: %s", got)
+		t.Fatalf("hosted tools: %s", got)
 	}
 	read := toolText(t, rpc(t, url, 3, "tools/call", map[string]any{"name": "clank_read", "arguments": map[string]any{"channel": "#public-room"}}), false)
 	if !strings.Contains(read, " readable over http\nnext: --after ") || !strings.HasPrefix(read, "<untrusted-channel-content>\n") {
@@ -632,17 +761,83 @@ func TestClankMCPHTTPReadOnly(t *testing.T) {
 	if got := toolText(t, rpc(t, url, 6, "tools/call", map[string]any{"name": "clank_read", "arguments": map[string]any{"channel": "#public-room", "limit": 51}}), true); !strings.HasPrefix(got, "error: E_USAGE: --limit must be 1-50") {
 		t.Fatalf("limit 51: %q", got)
 	}
-	// An oversize request is refused before it is read.
-	big := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":7,"method":"ping","params":{"pad":%q}}`, strings.Repeat("x", 20000)))
-	if code, _ := postRPC(t, url, big); code != 413 {
+
+	// Header validation (streamable-http §Server Validation): 400, -32020.
+	call := rpcBody(7, "tools/call", withMeta(map[string]any{"name": "clank_channels", "arguments": map[string]any{}}))
+	std := stdHeaders(call)
+	mutate := func(k, v string) map[string]string {
+		h := map[string]string{}
+		for a, b := range std {
+			h[a] = b
+		}
+		if v == "" {
+			delete(h, k)
+		} else {
+			h[k] = v
+		}
+		return h
+	}
+	for _, c := range []struct {
+		why     string
+		headers map[string]string
+	}{
+		{"no MCP-Protocol-Version", mutate("MCP-Protocol-Version", "")},
+		{"MCP-Protocol-Version differs from _meta", mutate("MCP-Protocol-Version", "2025-11-25")},
+		{"no Mcp-Method", mutate("Mcp-Method", "")},
+		{"Mcp-Method differs from method", mutate("Mcp-Method", "tools/list")},
+		{"no Mcp-Name on tools/call", mutate("Mcp-Name", "")},
+		{"Mcp-Name differs from params.name", mutate("Mcp-Name", "clank_read")},
+		{"Mcp-Name base64 of another name", mutate("Mcp-Name", "=?base64?Y2xhbmtfcmVhZA==?=")},
+	} {
+		code, m := postRPC(t, url, call, c.headers)
+		if e, _ := m["error"].(map[string]any); code != 400 || e == nil || e["code"] != float64(-32020) || m["id"] != float64(7) {
+			t.Fatalf("%s: HTTP %d %v, want 400 HeaderMismatch", c.why, code, m)
+		}
+	}
+	// Positive controls: the standard headers, and Mcp-Name in the Base64 form.
+	for _, hd := range []map[string]string{std, mutate("Mcp-Name", "=?base64?Y2xhbmtfY2hhbm5lbHM=?=")} {
+		if code, m := postRPC(t, url, call, hd); code != 200 || m["result"] == nil {
+			t.Fatalf("well-formed headers %v: HTTP %d %v", hd, code, m)
+		}
+	}
+
+	// An oversize request is refused before it is read; the same request,
+	// small, is answered.
+	big := rpcBody(8, "server/discover", withMeta(map[string]any{"pad": strings.Repeat("x", 20000)}))
+	if code, _ := postRPC(t, url, big, nil); code != 413 {
 		t.Fatalf("oversize request: HTTP %d, want 413", code)
 	}
-	// Its positive control: the same request, small, is answered.
-	if code, m := postRPC(t, url, []byte(`{"jsonrpc":"2.0","id":8,"method":"ping","params":{"pad":"x"}}`)); code != 200 || m["result"] == nil {
-		t.Fatalf("small ping: HTTP %d %v", code, m)
+	if code, m := postRPC(t, url, rpcBody(9, "server/discover", withMeta(map[string]any{"pad": "x"})), nil); code != 200 || m["result"] == nil {
+		t.Fatalf("small request: HTTP %d %v", code, m)
 	}
-	if resp, _ := http.Get(url); resp.StatusCode != 405 {
-		t.Fatalf("GET /mcp: HTTP %d, want 405", resp.StatusCode)
+	// No GET stream, no DELETE (no sessions).
+	for _, method := range []string{"GET", "DELETE"} {
+		req, _ := http.NewRequest(method, url, nil)
+		if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 405 {
+			t.Fatalf("%s /mcp: %v %v, want 405", method, resp.StatusCode, err)
+		}
+	}
+	// A notification: none is defined over HTTP, so it is refused (400).
+	if code, _ := postRPC(t, url, []byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}`), map[string]string{"Mcp-Method": "notifications/cancelled", "MCP-Protocol-Version": mcpVersion}); code != 400 {
+		t.Fatalf("notification over http: HTTP %d, want 400", code)
+	}
+	// Origin: a listed one is served, any other is 403 (streamable-http §Security).
+	disc := rpcBody(10, "server/discover", withMeta(nil))
+	for origin, want := range map[string]int{"https://allowed.example": 200, "https://evil.example": 403} {
+		hd := stdHeaders(disc)
+		hd["Origin"] = origin
+		if code, _ := postRPC(t, url, disc, hd); code != want {
+			t.Fatalf("Origin %s: HTTP %d, want %d", origin, code, want)
+		}
+	}
+	// No session is minted.
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(disc))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range stdHeaders(disc) {
+		req.Header.Set(k, v)
+	}
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.Header.Get("Mcp-Session-Id") != "" {
+		t.Fatalf("a session id was sent: %v %v", resp.Header, err)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(srv.env[len(srv.env)-1][len("CLANK_KEY="):]), "must-not-exist")); !os.IsNotExist(err) {
 		t.Fatal("the hosted server created a key")

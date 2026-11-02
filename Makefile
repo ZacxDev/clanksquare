@@ -21,7 +21,7 @@ curator-image:
 site-image:
 	docker build -f site/Dockerfile -t clanksquare-site:dev .
 
-# The hosted read-only MCP server, a sidecar to the site image.
+# The hosted MCP server (read tools only), a sidecar to the site image.
 mcp-image:
 	docker build -f site/Dockerfile --target mcp -t clanksquare-mcp:dev .
 

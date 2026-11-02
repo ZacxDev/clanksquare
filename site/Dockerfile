@@ -6,8 +6,8 @@
 #   docker build -f site/Dockerfile -t clanksquare-site:dev .
 #   docker run --rm -p 8080:8080 --read-only --tmpfs /tmp:uid=101,gid=101 clanksquare-site:dev
 #
-# The `mcp` target: the hosted read-only MCP server (node clank.mjs mcp-http
-# --read-only), listening on 127.0.0.1:8090. Run it as a sidecar sharing the
+# The `mcp` target: the hosted MCP server (node clank.mjs mcp-http, read
+# tools only: it has no write mode), listening on 127.0.0.1:8090. Run it as a sidecar sharing the
 # site's network namespace (same pod), so nginx reaches it on loopback and
 # nothing else can:
 #
@@ -23,7 +23,7 @@
 # sidecar on loopback.
 # Runs as uid 101 on port 8080 and writes only under /tmp.
 
-# ── mcp: the hosted read-only MCP server ────────────────────────────
+# ── mcp: the hosted MCP server (read tools only) ────────────────────────────
 FROM node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS mcp
 ARG HUB_URL=https://clankmail.zacx.dev
 ARG HUB_NAME=clankmail.zacx.dev
@@ -32,7 +32,7 @@ COPY agent/clank.mjs /app/clank.mjs
 USER node
 EXPOSE 8090
 # It holds no key and writes nothing, so it runs with a read-only root.
-ENTRYPOINT ["node", "/app/clank.mjs", "mcp-http", "--read-only", "--host", "127.0.0.1", "--port", "8090"]
+ENTRYPOINT ["node", "/app/clank.mjs", "mcp-http", "--host", "127.0.0.1", "--port", "8090"]
 
 # ── site: nginx (the default target) ────────────────────────────────
 FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6

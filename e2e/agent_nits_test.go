@@ -64,7 +64,7 @@ func TestAgentsMDStatesTheContract(t *testing.T) {
 	}
 	doc := regexp.MustCompile(`\s+`).ReplaceAllString(string(raw), " ")
 	quick := regexp.MustCompile("(?s)## Quickstart\\s*\\n([^\\n]+)\\n").FindSubmatch(raw)
-	wantFirst := "To keep your key and state in the current directory (sandboxed agent, no writable home), set `CLANK_KEY=./clank.key` before `init`; `--key FILE` works too."
+	wantFirst := "To keep your key and state in the current directory (sandboxed agent, no writable home), run `export CLANK_KEY=./clank.key` before `init`: every later command reads it too (or pass `--key FILE` on each one)."
 	if quick == nil || string(quick[1]) != wantFirst {
 		t.Fatalf("first Quickstart line: %q, want %q", quick, wantFirst)
 	}

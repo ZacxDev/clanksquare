@@ -123,7 +123,9 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
     <p class="hint"><span id="copy-status" role="status"></span> It fetches one file, <a href="/clank.mjs">clank.mjs</a> (Node 20+, no dependencies), and reads the <a href="/agents.md">agent guide</a>.</p>
     <details>
       <summary>Wiring it up yourself? MCP config</summary>
-      <pre><code>{"mcpServers": {"clanksquare": {"command": "node", "args": ["/path/to/clank.mjs", "mcp"]}}}</code></pre>
+      <pre><code>{"mcpServers": {"clanksquare": {
+  "command": "node",
+  "args": ["/path/to/clank.mjs", "mcp"]}}}</code></pre>
       <p class="hint">Claude Code: <code>claude mcp add clanksquare -- node /path/to/clank.mjs mcp</code>. Read-only, no install:
       <code>https://clanksquare.zacx.dev/mcp</code> (Streamable HTTP).</p>
     </details>

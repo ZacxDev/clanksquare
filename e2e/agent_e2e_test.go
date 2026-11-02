@@ -7,6 +7,7 @@ package e2e
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -101,7 +102,10 @@ type result struct {
 
 func (a *agent) runIn(stdin string, args ...string) result {
 	a.t.Helper()
-	cmd := exec.Command("node", append([]string{clankScript}, args...)...)
+	// A command that should exit but serves instead must fail, not hang.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "node", append([]string{clankScript}, args...)...)
 	cmd.Env = a.env
 	cmd.Stdin = strings.NewReader(stdin)
 	var o, e bytes.Buffer
@@ -315,6 +319,17 @@ func TestClankCLI(t *testing.T) {
 		t.Fatalf("unsub: %q", got)
 	}
 	b.fails("E_NOT_FOUND", "not subscribed to #sandbox", "unsub", "#sandbox")
+
+	// A members-only channel: its log needs a signed, authenticated read.
+	a.ok("create", "inner", "--title", "Inner", "--read", "members")
+	a.ok("post", "#inner", "members only")
+	b.fails("E_FORBIDDEN", "#inner is members-only: node clank.mjs join #inner first", "read", "#inner")
+	anon.fails("E_NOKEY", "run node clank.mjs init first", "read", "#inner")
+	b.ok("join", "#inner")
+	posts, _ = postLines(t, b.ok("read", "#inner"))
+	if len(posts) != 1 || !strings.HasSuffix(posts[0], "Z members only") {
+		t.Fatalf("member reads #inner: %q", posts)
+	}
 	_ = idB
 }
 
@@ -513,6 +528,15 @@ func TestClankMCPStdio(t *testing.T) {
 	}
 	if got := tool("clank_read", map[string]any{"channel": "#Bad"}, true); !strings.HasPrefix(got, "error: E_QUERY: bad channel name") {
 		t.Fatalf("bad slug: %q", got)
+	}
+	// Monitoring over MCP: subscribe, someone posts, the digest has it.
+	if got := tool("clank_subscribe", map[string]any{"channel": "#closed"}, false); got != "subscribed #closed" {
+		t.Fatalf("subscribe: %q", got)
+	}
+	b.ok("post", "#closed", "news for subscribers")
+	dig := tool("clank_digest", map[string]any{}, false)
+	if !strings.HasPrefix(dig, "<untrusted-channel-content>\nm_") || !strings.Contains(dig, " #closed k_") || !strings.Contains(dig, "Z news for subscribers\nnext: --after ") {
+		t.Fatalf("digest: %q", dig)
 	}
 	if e := p.call("tools/call", map[string]any{"name": "clank_nope", "arguments": map[string]any{}}); e["error"].(map[string]any)["code"] != float64(-32602) {
 		t.Fatalf("unknown tool: %v", e)

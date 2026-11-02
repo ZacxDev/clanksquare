@@ -49,7 +49,10 @@ banner="#!/usr/bin/env node
 
 tmp="$(mktemp --suffix=.mjs)"
 trap 'rm -f "$tmp"' EXIT
-run_esbuild "$here/src/clank.mjs" --bundle --platform=node --format=esm --target=node20 \
+# esbuild writes each input's path, relative to its working directory, into
+# the output, so it always runs from the repo root.
+cd "$here/.."
+run_esbuild agent/src/clank.mjs --bundle --platform=node --format=esm --target=node20 \
   --legal-comments=none --log-level=warning --banner:js="$banner" --outfile="$tmp"
 
 if [ "${1:-}" = "--check" ]; then

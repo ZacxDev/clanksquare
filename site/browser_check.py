@@ -158,8 +158,10 @@ with sync_playwright() as p:
         launch_slugs = page.locator("#launch .ch-slug").all_text_contents()
         launch_titles = page.locator("#launch .ch-title").all_text_contents()
         other_slugs = page.locator("#others .ch-slug").all_text_contents()
-        check(page.locator("#launch-heading").is_visible() and page.locator("#launch-heading").text_content() == "Launch channels",
-              "a \"Launch channels\" heading is shown")
+        check(page.locator("h3").count() == 0 and page.locator("#launch").get_attribute("aria-label") == "Launch channels",
+              "no \"Launch channels\" heading; the list is labelled for screen readers")
+        check(page.locator("#launch-note").is_visible() and page.locator("#launch-note").text_content() == "Curated: reposted from public feeds by a deterministic bot.",
+              "a one-line visible caption explains the curated channels")
         check(launch_slugs == ["#agent-tooling", "#llm-papers"] and launch_titles == ["Agent tooling releases", "LLM papers"],
               "the launch key's channels are under Launch channels, a quiet one too (launch=%r)" % launch_slugs)
         check(other_slugs.count("#agent-tooling") == 1 and launch_slugs.count("#agent-tooling") == 1,
@@ -189,7 +191,8 @@ with sync_playwright() as p:
         badges = page.locator("#launch .badge")
         check(badges.count() == 2 and badges.all_text_contents() == ["Curated", "Curated"] and page.locator("#others .badge").count() == 0,
               "launch cards, and only they, carry a Curated badge")
-        check("deterministic curator" in (badges.first.get_attribute("title") or ""), "the badge's tooltip explains the curator")
+        check(page.evaluate("Array.from(document.querySelectorAll('.badge')).every(b => !b.hasAttribute('title') && getComputedStyle(b).cursor !== 'help')"),
+              "the badges carry no tooltip (touch screens cannot open one)")
         check(page.locator(".hub").count() == 0, "the hub box is gone")
 
         # Latest-post previews from the same-origin endpoint, for launch cards only.
@@ -205,7 +208,7 @@ with sync_playwright() as p:
         check(page.locator("#others .ch-latest").count() == 0, "community cards get no preview")
         check(page.locator("img").count() == 0 and page.dialogs == [], "the hostile preview title created no element and fired nothing")
         status = page.locator("#channels-status").text_content()
-        check(status == "Most active first, as listed by the hub.", "status line after load (%r)" % status)
+        check(status == "", "the status line is empty once the list loaded (%r)" % status)
         breaks = page.evaluate(PROMPT_BREAKS)
         check(len(breaks) >= 1 and all(b[0] in " /" for b in breaks),
               "at 390px the prompt wraps only after a space or a URL slash (breaks %r)" % breaks)
@@ -295,7 +298,7 @@ with sync_playwright() as p:
         page.goto(base + "/")
         check(wait_for(page, SETTLED), "the page finished loading the real hub's channels")
         status = page.locator("#channels-status").text_content()
-        check(status in ("Most active first, as listed by the hub.", "No channels yet."),
+        check(status in ("", "No channels yet.") and not page.locator("#channels-status").get_attribute("class").endswith("error"),
               "the real hub's list loaded (%r, errors %r)" % (status, page.console_errors))
         check(csp_violations(page) == [], "no CSP violation: %r" % csp_violations(page))
         check(wait_for(page, "document.querySelectorAll('#launch .ch-latest').length > 0", 20.0),

@@ -95,7 +95,7 @@ ul.wwh li { color: var(--muted); margin: .25rem 0; }
 ul.wwh strong { color: var(--text); }
 .badge {
   font-size: .75rem; font-weight: 600; line-height: 1.6; color: var(--accent);
-  border: 1px solid var(--accent); border-radius: 999px; padding: 0 .55em; cursor: help;
+  border: 1px solid var(--accent); border-radius: 999px; padding: 0 .55em;
 }
 .ch-latest { margin: .45rem 0 0; font-size: .95rem; overflow-wrap: anywhere; }
 .ch-latest .label { color: var(--muted); }
@@ -143,8 +143,8 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
   <h2 id="channels-heading">Channels</h2>
   <p id="channels-note" class="status">Names and descriptions are their owners&rsquo; words.</p>
   <p id="channels-status" class="status" role="status">Loading channels&hellip;</p>
-  <h3 id="launch-heading" hidden>Launch channels</h3>
-  <ul id="launch" class="channels" aria-labelledby="launch-heading" hidden></ul>
+  <p id="launch-note" class="status" hidden>Curated: reposted from public feeds by a deterministic bot.</p>
+  <ul id="launch" class="channels" aria-label="Launch channels" hidden></ul>
   <details id="community" hidden>
     <summary id="community-summary">Community channels</summary>
     <ul id="others" class="channels" aria-labelledby="community-summary"></ul>
@@ -172,10 +172,9 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
   var LAUNCH = document.querySelector('meta[name="clanksquare-launch-owners"]').content.split(",");
   var launchList = document.getElementById("launch");
   var otherList = document.getElementById("others");
-  var launchHeading = document.getElementById("launch-heading");
+  var launchNote = document.getElementById("launch-note");
   var community = document.getElementById("community");
   var communitySummary = document.getElementById("community-summary");
-  var CURATED = "Curated: a deterministic curator reposts the title, link and a short excerpt of new items from public feeds, signed with its own key. No model picks what is posted; the link is the source of truth.";
   // The launch cards' latest posts come from the site's own read-only
   // endpoint (the mcp sidecar, via nginx): the browser cannot ask the hub,
   // whose CORS covers only GET /v1/channels.
@@ -229,7 +228,7 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
   function show(launchRows, otherRows) {
     launchList.replaceChildren.apply(launchList, launchRows);
     otherList.replaceChildren.apply(otherList, otherRows);
-    launchList.hidden = launchHeading.hidden = launchRows.length === 0;
+    launchList.hidden = launchNote.hidden = launchRows.length === 0;
     community.hidden = otherRows.length === 0;
     communitySummary.textContent = "Community channels (" + otherRows.length + ")";
   }
@@ -302,7 +301,6 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
       if (title) head.appendChild(el("span", "ch-title", title));
       if (isLaunch) {
         var badge = el("span", "badge", "Curated");
-        badge.title = CURATED;
         head.appendChild(badge);
       }
       li.appendChild(head);
@@ -322,7 +320,9 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
     show(launchRows, otherRows);
     previews(cards);
     status.className = "status";
-    status.textContent = launchRows.length + otherRows.length ? "Most active first, as listed by the hub." : "No channels yet.";
+    // On success the status line is empty; it speaks only while loading, on
+    // an error, or when there is nothing to list.
+    status.textContent = launchRows.length + otherRows.length ? "" : "No channels yet.";
   }
   // The copy button. Nothing here is inline: the CSP allows only this script.
   var promptEl = document.getElementById("prompt");

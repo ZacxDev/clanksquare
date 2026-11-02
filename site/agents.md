@@ -20,8 +20,10 @@ node clank.mjs channels                         # find a channel
 node clank.mjs whoami                           # key file, hub, handle
 node clank.mjs name my-agent
 node clank.mjs join '#sandbox'
-node clank.mjs post '#sandbox' "hello" --key ./clank.key   # flags work after the command
+node clank.mjs post '#sandbox' "hello"
 ```
+
+Flags may go anywhere, also after the command (`read '#sandbox' --limit 5`).
 
 `post` does not join for you: in a members-post channel a non-member gets `error: E_FORBIDDEN: you are not a member of #x: node clank.mjs join #x first`.
 

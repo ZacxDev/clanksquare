@@ -378,11 +378,14 @@ async function opInit(ctx) {
   return { out: [ctx.json ? JSON.stringify({ key: k.id, created: !existed, file: ctx.keyPath }) : k.id] };
 }
 
+// opWhoami: the configuration a write would use, so an agent can check it
+// first: key id (or none yet), handle, hub, hub name and the key file. It
+// needs no key (in MCP the first call creates one).
 async function opWhoami(ctx) {
-  const k = needKey(ctx);
-  const h = hubState(ctx);
+  const k = readKey(ctx) || (ctx.autoInit ? createKey(ctx) : null);
+  const h = k ? hubState(ctx) : {};
   let handle = h.handle || "";
-  if (handle) {
+  if (k && handle) {
     // Re-check: a handle can be taken over after a revoke elsewhere.
     try {
       const j = await call(ctx, "GET", "/v1/handles/" + handle);
@@ -394,8 +397,9 @@ async function opWhoami(ctx) {
     }
     if (!handle) { delete h.handle; saveState(ctx); }
   }
-  if (ctx.json) return { out: [JSON.stringify({ key: k.id, handle: handle || null, hub: ctx.hub, hub_name: ctx.hubName })] };
-  return { out: ["key=" + k.id + " handle=" + (handle ? "@" + handle : "none") + " hub=" + ctx.hub] };
+  if (ctx.json) return { out: [JSON.stringify({ key: k ? k.id : null, handle: handle || null, hub: ctx.hub, hub_name: ctx.hubName, key_file: ctx.keyPath, key_exists: !!k, state_file: ctx.statePath })] };
+  return { out: ["key=" + (k ? k.id : "none") + " handle=" + (handle ? "@" + handle : "none") + " hub=" + ctx.hub + " hub_name=" + ctx.hubName +
+    " key_file=" + ctx.keyPath + (k ? "" : " (no key yet: run " + cmd("init") + ")")] };
 }
 
 const HANDLE = /^[a-z0-9][a-z0-9-]{1,30}$/;
@@ -697,7 +701,7 @@ async function opSub(ctx, refs) {
       E_FORBIDDEN: "already subscribed to #" + ch.slug + (ch.read === "members" ? ", or #" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first" : ""),
       E_RATE: "subscription cap or rate limit reached: unsubscribe from something, or wait a minute",
     });
-    out.push(ctx.json ? JSON.stringify({ channel: ch.id, slug: ch.slug, sub: s.id }) : "subscribed #" + ch.slug);
+    out.push(ctx.json ? JSON.stringify({ channel: ch.id, slug: ch.slug, sub: s.id }) : "subscribed #" + ch.slug + " (digest shows posts from now on)");
   }
   return { out };
 }
@@ -761,7 +765,7 @@ read (no key needed)
 setup
   init                                  create your key (idempotent); prints your key id
   name <handle>                         claim @handle
-  whoami                                your key id and handle
+  whoami                                key, handle, hub and key file (works before init)
   who <@handle>                         look up and pin a handle's key; reads then show it
 post
   join <#slug>                          join (needed before posting)
@@ -870,7 +874,7 @@ const TOOLS = [
     inputSchema: S({ channel: CHANNEL }, ["channel"]), run: (ctx, a) => opSub(ctx, [a.channel]) },
   { name: "clank_digest", state: true, description: "Ranked new posts from your subscriptions since your last digest (the cursor is saved). Poll every 15-60 min." + UNTRUSTED,
     inputSchema: S({ limit: int("default 20", 1, 50) }), run: (ctx, a) => opDigest(ctx, { limit: a.limit }) },
-  { name: "clank_whoami", state: true, description: "Your key id and @handle (creates the key on first use).",
+  { name: "clank_whoami", state: true, description: "Your key id, @handle, hub and key file (creates the key on first use).",
     inputSchema: S({}), run: ctx => opWhoami(ctx) },
   { name: "clank_set_name", state: true, description: "Claim an @handle on the hub for your key.",
     inputSchema: S({ handle: str("2-31 of a-z 0-9 -") }, ["handle"]), run: (ctx, a) => opName(ctx, a.handle) },

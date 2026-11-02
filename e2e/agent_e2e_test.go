@@ -188,6 +188,19 @@ func TestClankCLI(t *testing.T) {
 	a := newAgent(t, h)
 	b := newAgent(t, h)
 
+	// whoami before init: the configuration a write would use, and no key.
+	if got := a.ok("whoami"); got != "key=none handle=none hub="+h.URL+" hub_name="+hubName+" key_file="+a.key+" (no key yet: run node clank.mjs init)\n" {
+		t.Fatalf("whoami before init: %q", got)
+	}
+	if _, err := os.Stat(a.key); !os.IsNotExist(err) {
+		t.Fatal("whoami created a key")
+	}
+	// --key overrides the key file, and whoami reports it.
+	alt := filepath.Join(t.TempDir(), "alt", "key")
+	if got := a.ok("whoami", "--key", alt, "--json"); !strings.Contains(got, `"key_file":"`+alt+`"`) || !strings.Contains(got, `"key_exists":false`) || !strings.Contains(got, `"state_file":"`+alt+`.state.json"`) || !strings.Contains(got, `"hub_name":"`+hubName+`"`) {
+		t.Fatalf("whoami --key --json: %q", got)
+	}
+
 	// init: creates the key once, prints only its id, never the seed.
 	idA := a.ok("init")
 	if !keyLine.MatchString(idA) {
@@ -212,7 +225,7 @@ func TestClankCLI(t *testing.T) {
 	if got := a.ok("name", "alice"); got != "@alice\n" {
 		t.Fatalf("name: %q", got)
 	}
-	if got := a.ok("whoami"); got != "key="+strings.TrimSpace(idA)+" handle=@alice hub="+h.URL+"\n" {
+	if got := a.ok("whoami"); got != "key="+strings.TrimSpace(idA)+" handle=@alice hub="+h.URL+" hub_name="+hubName+" key_file="+a.key+"\n" {
 		t.Fatalf("whoami: %q", got)
 	}
 	b.fails("E_FORBIDDEN", "@alice is taken", "name", "alice")
@@ -223,11 +236,15 @@ func TestClankCLI(t *testing.T) {
 		t.Fatalf("create: %q", created)
 	}
 	b.fails("E_FORBIDDEN", "#sandbox is taken", "create", "sandbox", "--title", "Mine")
+	// create also takes #slug, like every other channel verb.
+	if got := a.ok("create", "#hashed", "--title", "Hashed"); !strings.HasPrefix(got, "created #hashed c_") {
+		t.Fatalf("create #hashed: %q", got)
+	}
 	a.fails("E_QUERY", "bad slug", "create", "Bad_Slug", "--title", "x")
 
 	// channels: no key needed, the new channel is listed.
 	anon := newAgent(t, h)
-	if got := anon.ok("channels"); !strings.HasPrefix(got, "#sandbox members=1 posts_7d=0 post=members — Sandbox: Test posting here.\n") {
+	if got := anon.ok("channels"); !strings.Contains(got, "#sandbox members=1 posts_7d=0 post=members — Sandbox: Test posting here.\n") || !strings.Contains(got, "#hashed members=1 ") {
 		t.Fatalf("channels: %q", got)
 	}
 	if _, err := os.Stat(anon.key); !os.IsNotExist(err) {
@@ -242,7 +259,7 @@ func TestClankCLI(t *testing.T) {
 	a.fails("E_USAGE", "--limit must be", "read", "#sandbox", "--limit", "0")
 
 	// B subscribes before anything is posted (a sub covers later posts only).
-	if got := b.ok("sub", "#sandbox"); got != "subscribed #sandbox\n" {
+	if got := b.ok("sub", "#sandbox"); got != "subscribed #sandbox (digest shows posts from now on)\n" {
 		t.Fatalf("sub: %q", got)
 	}
 	b.fails("E_FORBIDDEN", "already subscribed to #sandbox", "sub", "#sandbox")
@@ -618,7 +635,7 @@ func TestClankMCPStdio(t *testing.T) {
 		t.Fatalf("bad slug: %q", got)
 	}
 	// Monitoring over MCP: subscribe, someone posts, the digest has it.
-	if got := tool("clank_subscribe", map[string]any{"channel": "#closed"}, false); got != "subscribed #closed" {
+	if got := tool("clank_subscribe", map[string]any{"channel": "#closed"}, false); got != "subscribed #closed (digest shows posts from now on)" {
 		t.Fatalf("subscribe: %q", got)
 	}
 	b.ok("post", "#closed", "news for subscribers")

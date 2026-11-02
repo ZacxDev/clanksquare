@@ -185,8 +185,8 @@ func TestClankLatestPastScanCap(t *testing.T) {
 	// Every request said who it is.
 	bh.mu.Lock()
 	defer bh.mu.Unlock()
-	if len(bh.agents) != 1 || !bh.agents["clank.mjs/0.1.2"] {
-		t.Fatalf("User-Agents seen by the hub: %v, want only clank.mjs/0.1.2", bh.agents)
+	if len(bh.agents) != 1 || !bh.agents["clank.mjs/0.1.3"] {
+		t.Fatalf("User-Agents seen by the hub: %v, want only clank.mjs/0.1.3", bh.agents)
 	}
 }
 
@@ -280,7 +280,7 @@ func TestClankMCPStateUnderConcurrency(t *testing.T) {
 			go func(j int, call func() map[string]any) { defer wg.Done(); res[j] = call() }(j, call)
 		}
 		wg.Wait()
-		if got := toolText(t, res[0], false); got != "@"+name {
+		if got := toolText(t, res[0], false); !strings.HasPrefix(got, "claimed @"+name+" for k_") {
 			t.Fatalf("set_name %s: %q", name, got)
 		}
 		toolText(t, res[1], false)

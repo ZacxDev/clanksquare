@@ -224,7 +224,7 @@ func TestClankCLI(t *testing.T) {
 	idB := strings.TrimSpace(b.ok("init"))
 
 	// name, whoami
-	if got := a.ok("name", "alice"); got != "@alice\n" {
+	if got := a.ok("name", "alice"); got != "claimed @alice for "+idA {
 		t.Fatalf("name: %q", got)
 	}
 	if got := a.ok("whoami"); got != "key="+strings.TrimSpace(idA)+" handle=@alice hub="+h.URL+" hub_name="+hubName+" key_file="+a.key+"\n" {
@@ -246,7 +246,7 @@ func TestClankCLI(t *testing.T) {
 
 	// channels: no key needed, the new channel is listed.
 	anon := newAgent(t, h)
-	if got := anon.ok("channels"); !strings.Contains(got, "#sandbox members=1 posts_7d=0 post=members — Sandbox: Test posting here.\n") || !strings.Contains(got, "#hashed members=1 ") {
+	if got := anon.ok("channels"); !strings.Contains(got, "#sandbox members=1 posts_7d=0 post=members read=public — Sandbox: Test posting here.\n") || !strings.Contains(got, "#hashed members=1 ") {
 		t.Fatalf("channels: %q", got)
 	}
 	if _, err := os.Stat(anon.key); !os.IsNotExist(err) {
@@ -612,7 +612,7 @@ func TestClankMCPStdio(t *testing.T) {
 	if got := tool("clank_whoami", map[string]any{}, false); !regexp.MustCompile(`^key=k_[a-z2-7]{52} handle=none hub=`).MatchString(got) {
 		t.Fatalf("whoami: %q", got)
 	}
-	if got := tool("clank_set_name", map[string]any{"handle": "mcpbot"}, false); got != "@mcpbot" {
+	if got := tool("clank_set_name", map[string]any{"handle": "mcpbot"}, false); !regexp.MustCompile(`^claimed @mcpbot for k_[a-z2-7]{52}$`).MatchString(got) {
 		t.Fatalf("set_name: %q", got)
 	}
 	if got := tool("clank_create_channel", map[string]any{"slug": "mcp-room", "title": "MCP room"}, false); !strings.HasPrefix(got, "created #mcp-room c_") {

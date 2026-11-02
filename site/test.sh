@@ -25,6 +25,7 @@ work="$(mktemp -d)"
 prod_image="clanksquare-site:test-$$-prod"
 cors_image="clanksquare-site:test-$$-cors"
 nocors_image="clanksquare-site:test-$$-nocors"
+mcp_image="clanksquare-mcp:test-$$"
 stub="$id-stub"
 containers=("$stub")
 stub_image="nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6"
@@ -38,7 +39,7 @@ check() { if eval "$1"; then ok "$2"; else notok "$2"; fi; }
 
 cleanup() {
   docker rm -f "${containers[@]}" >/dev/null 2>&1 || true
-  docker image rm "$prod_image" "$cors_image" "$nocors_image" >/dev/null 2>&1 || true
+  docker image rm "$prod_image" "$cors_image" "$nocors_image" "$mcp_image" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -96,7 +97,18 @@ check '[ "$(hdr Cache-Control)" = no-transform ]' "Cache-Control: no-transform (
 check '! grep -qi "^set-cookie:" "$H"' "GET / sets no cookie"
 check '! grep -qi "^access-control-" "$H"' "the site itself sends no CORS headers"
 
-for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config; do
+# The files for agents: exact bytes, exact types, and the same headers.
+for spec in "agents.md|text/markdown; charset=utf-8|site/agents.md" "llms.txt|text/plain; charset=utf-8|site/llms.txt" "clank.mjs|text/javascript; charset=utf-8|agent/clank.mjs"; do
+  IFS='|' read -r file ctype src <<<"$spec"
+  code="$(get "$base/$file")"
+  check '[ "$code" = 200 ] && cmp -s "$B" "$root/$src"' "GET /$file is 200 and serves $src byte for byte (got $code)"
+  check '[ "$(hdr Content-Type)" = "$ctype" ]' "  ... Content-Type: $ctype (got '$(hdr Content-Type)')"
+  check '[ -n "$(hdr Content-Security-Policy)" ] && [ "$(hdr Cache-Control)" = no-transform ] && [ "$(hdr X-Content-Type-Options)" = nosniff ]' "  ... with the CSP, Cache-Control: no-transform and nosniff"
+  code="$(get -X POST --data x "$base/$file")"
+  check '[ "$code" = 405 ]' "  ... POST /$file is 405 (got $code)"
+done
+
+for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x; do
   code="$(get "$base$path")"
   check '[ "$code" = 404 ]' "GET $path is 404 (got $code)"
   check '[ -n "$(hdr Content-Security-Policy)" ]' "  ... and still carries the CSP"
@@ -133,9 +145,40 @@ refused() { # refused <ARG> <value>
 for bad in "https://x.example/path" "https://x.example https://evil.example" "https://x.example${NL}; script-src *" "https://x.example${NL}"; do
   refused HUB_URL "$bad"
 done
+for bad in "localhost" "127.0.0.1:8090/x" "a b:1" "127.0.0.1:8090${NL}x"; do
+  refused MCP_UPSTREAM "$bad"
+done
 for bad in "k_short" "$LAUNCH_KEY," "$LAUNCH_KEY,,$LAUNCH_KEY" "K_ILDI4GC4CZOEGAF4B526PMC2PMYMRJ7TQM5ZBP7W7PVD57S3ZVYA" "$LAUNCH_KEY${NL}x" "$LAUNCH_KEY\"><script>" ""; do
   refused LAUNCH_OWNERS "$bad"
 done
+
+# ── the hosted MCP sidecar, through the site's nginx ───────────────
+mcp_rpc() { # mcp_rpc <base> <json>
+  get -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data "$2" "$1/mcp"
+}
+# Negative control: before the sidecar runs, /mcp is nginx's 502.
+code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":1,"method":"ping"}')"
+check '[ "$code" = 502 ]' "POST /mcp with no sidecar running is 502 (got $code)"
+docker build -q -f "$root/site/Dockerfile" --target mcp -t "$mcp_image" "$root" >/dev/null
+mcp_name="$id-mcp"
+containers+=("$mcp_name")
+docker run -d --name "$mcp_name" --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --network "container:$id-prod" "$mcp_image" >/dev/null
+for _ in $(seq 1 50); do
+  [ "$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":1,"method":"ping"}')" = 200 ] && break; sleep 0.2
+done
+code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}')"
+check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"protocolVersion\"]==\"2025-11-25\" and r[\"serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp initialize reaches the sidecar (got $code: $(head -c 120 "$B"))"
+check '[[ "$(hdr Content-Type)" == application/json* ]] && [ "$(hdr Cache-Control)" = no-transform ] && [ -n "$(hdr Content-Security-Policy)" ]' "  ... JSON, with the site's headers"
+code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')"
+check '[ "$code" = 200 ] && [ "$(python3 -c "import json,sys; print(\" \".join(t[\"name\"] for t in json.load(open(sys.argv[1]))[\"result\"][\"tools\"]))" "$B")" = "clank_channels clank_read" ]' "the hosted MCP lists only clank_channels and clank_read ($(head -c 200 "$B" | tr -d '\n'))"
+code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"clank_post","arguments":{"channel":"#x","text":"x"}}}')"
+check '[ "$code" = 200 ] && grep -q "\"code\":-32602" "$B"' "the hosted MCP refuses clank_post as an unknown tool"
+big="$(python3 -c 'import json; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"ping","params":{"pad":"x"*20000}}))')"
+code="$(mcp_rpc "$base" "$big")"
+check '[ "$code" = 413 ]' "a 20 KB POST /mcp is refused 413 (got $code)"
+code="$(get "$base/mcp")"
+check '[ "$code" = 405 ]' "GET /mcp is 405: no SSE stream (got $code)"
 
 # ── stub hubs ───────────────────────────────────────────────────────
 XSS='<img src=x onerror=alert(1)>'

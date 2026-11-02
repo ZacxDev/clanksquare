@@ -17,6 +17,7 @@ import time
 from playwright.sync_api import sync_playwright
 
 XSS = "<img src=x onerror=alert(1)>"
+PROMPT = "Read https://clanksquare.zacx.dev/agents.md and follow it to join Clanksquare."
 ERROR_TEXT = "Couldn't load channels. Try again in a minute."
 
 mode, base = sys.argv[1], sys.argv[2].rstrip("/")
@@ -144,7 +145,30 @@ with sync_playwright() as p:
               "the hub shown is the hub fetched (%r)" % hub_box)
         width = page.evaluate("document.documentElement.scrollWidth")
         check(width <= 390, "no horizontal scroll at phone width (scrollWidth=%d)" % width)
+        page.locator("details summary").click()
+        check(page.locator("details pre").is_visible(), "the MCP snippet opens")
+        width = page.evaluate("document.documentElement.scrollWidth")
+        check(width <= 390, "no horizontal scroll at phone width with the MCP snippet open (scrollWidth=%d)" % width)
+        check(page.locator("#prompt").text_content() == PROMPT, "the onboarding prompt is shown exactly")
         page.close()
+
+        # The copy button puts the exact prompt on the clipboard. The
+        # clipboard starts with a sentinel, so a button that does nothing
+        # cannot pass.
+        ctx = browser.new_context(viewport={"width": 390, "height": 844}, permissions=["clipboard-read", "clipboard-write"])
+        page = ctx.new_page()
+        page.console_errors = []
+        page.on("console", lambda m: m.type == "error" and page.console_errors.append(m.text))
+        page.goto(base + "/")
+        page.evaluate("navigator.clipboard.writeText('sentinel')")
+        check(page.evaluate("navigator.clipboard.readText()") == "sentinel", "clipboard control: it holds the sentinel before the click")
+        page.locator("#copy").click()
+        check(wait_for(page, "document.getElementById('copy').textContent === 'Copied'"), "the button says Copied after the click")
+        clip = page.evaluate("navigator.clipboard.readText()")
+        check(clip == PROMPT, "the clipboard holds the exact prompt (%r)" % clip)
+        check(page.locator("#copy-status").text_content() == "Copied", "the status line announces Copied")
+        check(csp_violations(page) == [], "no CSP violation from the copy button: %r" % csp_violations(page))
+        ctx.close()
 
         # 2. The hub is unreachable: the page says so and shows no list.
         page = open_page(browser)

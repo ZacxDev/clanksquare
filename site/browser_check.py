@@ -18,6 +18,37 @@ from playwright.sync_api import sync_playwright
 
 XSS = "<img src=x onerror=alert(1)>"
 PROMPT = "Read https://clanksquare.zacx.dev/agents.md and follow it to join Clanksquare."
+LAUNCH_C1 = "c_" + "l" * 52   # #agent-tooling, the launch key's (site/test.sh stub)
+LAUNCH_C2 = "c_" + "m" * 52   # #llm-papers, the launch key's, 0 posts this week
+PREVIEW_TITLE = "Release " + XSS
+LATEST = {"items": [
+    {"channel": LAUNCH_C1, "title": PREVIEW_TITLE, "link": "https://example.org/release"},
+    {"channel": LAUNCH_C2, "title": "No link here", "link": "javascript:alert(1)"},
+    {"channel": "c_plain", "title": "not a launch card", "link": "https://example.org/x"},
+]}
+
+# Where the onboarding prompt wraps: for each line break, the characters on
+# either side. It may break only after a space or after a "/" of its URL.
+PROMPT_BREAKS = r"""(() => {
+  const el = document.getElementById('prompt');
+  const text = el.textContent;
+  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const tops = [];
+  let n, base = 0;
+  while ((n = w.nextNode())) {
+    for (let i = 0; i < n.data.length; i++) {
+      const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + 1);
+      const rect = r.getClientRects()[0];
+      if (rect && rect.width > 0) tops.push([base + i, Math.round(rect.top)]);
+    }
+    base += n.data.length;
+  }
+  const out = [];
+  for (let k = 1; k < tops.length; k++) {
+    if (tops[k][1] > tops[k - 1][1] + 2) out.push(text[tops[k][0] - 1] + '|' + text[tops[k][0]]);
+  }
+  return out;
+})()"""
 ERROR_TEXT = "Couldn't load channels. Try again in a minute."
 
 mode, base = sys.argv[1], sys.argv[2].rstrip("/")
@@ -91,6 +122,11 @@ with sync_playwright() as p:
     if mode == "stub":
         # 1. The live list, from the CORS stub, with hostile fields.
         page = open_page(browser, viewport={"width": 390, "height": 844})
+        latest_urls = []
+        def fulfil_latest(route):
+            latest_urls.append(route.request.url)
+            route.fulfill(status=200, content_type="application/json", body=__import__("json").dumps(LATEST))
+        page.route("**/api/latest*", fulfil_latest)
         page.goto(base + "/")
         check(wait_for(page, "document.querySelectorAll('.channels li').length > 0"),
               "the channel list rendered from the stub hub, cross-origin")
@@ -103,8 +139,8 @@ with sync_playwright() as p:
         check("#" + XSS in slugs, "hostile slug rendered as its exact text")
         check(any(XSS in a for a in abouts), "hostile about rendered as text")
         check(page.locator("img").count() == 0, "no <img> element exists in the page")
-        check(page.evaluate("document.querySelectorAll('.channels *:not(li):not(div):not(span):not(p)').length") == 0,
-              "the lists hold only li/div/span/p elements")
+        check(page.evaluate("Array.from(document.querySelectorAll('.channels *:not(li):not(div):not(span):not(p)')).filter(e => !(e.tagName === 'A' && e.parentElement.classList.contains('ch-latest'))).length") == 0,
+              "the lists hold only li/div/span/p elements, and preview links")
         check(page.dialogs == [], "no dialog fired (got %r)" % page.dialogs)
         check(csp_violations(page) == [], "no CSP violation (hashes and connect-src match): %r" % csp_violations(page))
         check("#smoke-hidden" not in slugs, "a channel tagged smoke is not listed")
@@ -124,33 +160,87 @@ with sync_playwright() as p:
         other_slugs = page.locator("#others .ch-slug").all_text_contents()
         check(page.locator("#launch-heading").is_visible() and page.locator("#launch-heading").text_content() == "Launch channels",
               "a \"Launch channels\" heading is shown")
-        check(launch_slugs == ["#agent-tooling"] and launch_titles == ["Agent tooling releases"],
-              "the launch key's channel is under Launch channels (launch=%r)" % launch_slugs)
-        check(other_slugs.count("#agent-tooling") == 1 and len(launch_slugs) == 1,
+        check(launch_slugs == ["#agent-tooling", "#llm-papers"] and launch_titles == ["Agent tooling releases", "LLM papers"],
+              "the launch key's channels are under Launch channels, a quiet one too (launch=%r)" % launch_slugs)
+        check(other_slugs.count("#agent-tooling") == 1 and launch_slugs.count("#agent-tooling") == 1,
               "the lookalike (same slug and title, another key) is NOT under launch, but below (others=%r)" % other_slugs)
         order = page.evaluate("Array.from(document.querySelectorAll('.channels li .ch-slug')).map(e => e.closest('ul').id)")
-        check(order[:1] == ["launch"] and "launch" not in order[1:], "launch channels come first on the page (%r)" % order)
+        check(order[:1] == ["launch"] and "launch" not in order[order.index("others"):], "launch channels come first on the page (%r)" % order)
         check(other_slugs == ["#" + XSS, "#plain", "#bidi", "#agent-tooling"],
               "the other channels, in the hub's order (%r)" % other_slugs)
         note = page.locator("#channels-note").text_content()
-        check(note == "Created by anyone on the hub; names and descriptions are their owners\u2019 words, not Clanksquare\u2019s.",
-              "the list is labelled as made by anyone on the hub (%r)" % note)
+        check(note == "Names and descriptions are their owners\u2019 words.", "a one-line note on whose words the list holds (%r)" % note)
+
+        # Community channels: collapsed, counted, and without the sandbox,
+        # test-tagged channels or channels with no posts this week.
+        check("#sandbox" not in other_slugs, "#sandbox is not listed (others=%r)" % other_slugs)
+        check("#tagged-test" not in other_slugs, "a channel tagged test is not listed")
+        check("#quiet" not in other_slugs, "a channel with 0 posts this week is not listed")
+        check(page.locator("#community-summary").text_content() == "Community channels (4)",
+              "the community list is summarised with its count (%r)" % page.locator("#community-summary").text_content())
+        check(page.evaluate("document.getElementById('community').open") is False and page.locator("#community-summary").is_visible()
+              and not page.locator("#others").is_visible(), "the community list is collapsed by default")
 
         metas = page.locator("#others .ch-meta").all_text_contents()
-        check(metas[:1] == ["3 members \u00b7 7 posts in the last 7 days"], "members and posts_7d shown (%r)" % metas)
+        launch_metas = page.locator("#launch .ch-meta").all_text_contents()
+        check(metas[:1] == ["7 posts this week"] and launch_metas == ["2 posts this week", "0 posts this week"],
+              "cards show posts this week (%r %r)" % (metas[:1], launch_metas))
+        check("member" not in page.locator("main").text_content(), "no member counts are shown")
+        badges = page.locator("#launch .badge")
+        check(badges.count() == 2 and badges.all_text_contents() == ["Curated", "Curated"] and page.locator("#others .badge").count() == 0,
+              "launch cards, and only they, carry a Curated badge")
+        check("deterministic curator" in (badges.first.get_attribute("title") or ""), "the badge's tooltip explains the curator")
+        check(page.locator(".hub").count() == 0, "the hub box is gone")
+
+        # Latest-post previews from the same-origin endpoint, for launch cards only.
+        check(wait_for(page, "document.querySelectorAll('#launch .ch-latest').length === 2"), "both launch cards show a latest post")
+        check(latest_urls == [base + "/api/latest?c=" + LAUNCH_C1 + "," + LAUNCH_C2],
+              "the page asked /api/latest, same origin, for the launch channels only (%r)" % latest_urls)
+        first = page.locator("#launch li").nth(0).locator(".ch-latest a")
+        check(first.count() == 1 and first.text_content() == PREVIEW_TITLE and first.get_attribute("href") == "https://example.org/release",
+              "the preview title is exact text, linked to its http(s) link")
+        second = page.locator("#launch li").nth(1).locator(".ch-latest")
+        check(second.locator("a").count() == 0 and second.text_content() == "Latest: No link here",
+              "a javascript: link is not linked (%r)" % second.text_content())
+        check(page.locator("#others .ch-latest").count() == 0, "community cards get no preview")
+        check(page.locator("img").count() == 0 and page.dialogs == [], "the hostile preview title created no element and fired nothing")
         status = page.locator("#channels-status").text_content()
         check(status == "Most active first, as listed by the hub.", "status line after load (%r)" % status)
-        hub_box = page.locator(".hub code").text_content()
-        check(hub_box == page.evaluate("document.querySelector('meta[name=\"clanksquare-hub\"]').content"),
-              "the hub shown is the hub fetched (%r)" % hub_box)
+        breaks = page.evaluate(PROMPT_BREAKS)
+        check(len(breaks) >= 1 and all(b[0] in " /" for b in breaks),
+              "at 390px the prompt wraps only after a space or a URL slash (breaks %r)" % breaks)
         width = page.evaluate("document.documentElement.scrollWidth")
         check(width <= 390, "no horizontal scroll at phone width (scrollWidth=%d)" % width)
-        page.locator("details summary").click()
-        check(page.locator("details pre").is_visible(), "the MCP snippet opens")
+        page.locator(".onboard details summary").click()
+        check(page.locator(".onboard details pre").is_visible(), "the MCP snippet opens")
         width = page.evaluate("document.documentElement.scrollWidth")
         check(width <= 390, "no horizontal scroll at phone width with the MCP snippet open (scrollWidth=%d)" % width)
         check(page.locator("#prompt").text_content() == PROMPT, "the onboarding prompt is shown exactly")
+        check(csp_violations(page) == [], "no CSP violation after the preview fetch: %r" % csp_violations(page))
         page.close()
+
+        # The endpoint fails: the cards stand, without previews, no error.
+        page = open_page(browser)
+        page.route("**/api/latest*", lambda route: route.fulfill(status=502, body="bad gateway"))
+        page.goto(base + "/")
+        check(wait_for(page, "document.querySelectorAll('#launch li').length === 2"), "with /api/latest failing, launch cards still render")
+        page.wait_for_timeout(300)
+        check(page.locator(".ch-latest").count() == 0 and "error" not in (page.locator("#channels-status").get_attribute("class") or ""),
+              "and show no preview and no error")
+        page.close()
+
+        # Wide and dark: no horizontal overflow.
+        for vw, scheme in ((1280, "light"), (390, "dark"), (1280, "dark")):
+            page = open_page(browser, viewport={"width": vw, "height": 900}, color_scheme=scheme)
+            page.route("**/api/latest*", fulfil_latest)
+            page.goto(base + "/")
+            wait_for(page, "document.querySelectorAll('#launch .ch-latest').length === 2")
+            page.evaluate("document.getElementById('community').open = true")
+            width = page.evaluate("document.documentElement.scrollWidth")
+            check(width <= vw, "no horizontal scroll at %dpx, %s, community list open (scrollWidth=%d)" % (vw, scheme, width))
+            bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
+            check((bg == "rgb(21, 22, 26)") == (scheme == "dark"), "the %s theme's background applies (%s)" % (scheme, bg))
+            page.close()
 
         # The copy button puts the exact prompt on the clipboard. The
         # clipboard starts with a sentinel, so a button that does nothing
@@ -208,6 +298,8 @@ with sync_playwright() as p:
         check(status in ("Most active first, as listed by the hub.", "No channels yet."),
               "the real hub's list loaded (%r, errors %r)" % (status, page.console_errors))
         check(csp_violations(page) == [], "no CSP violation: %r" % csp_violations(page))
+        check(wait_for(page, "document.querySelectorAll('#launch .ch-latest').length > 0", 20.0),
+              "launch cards show latest posts from the site's /api/latest (%d)" % page.locator("#launch .ch-latest").count())
         page.close()
 
     else:

@@ -36,7 +36,7 @@ node clank.mjs channels [query]
 node clank.mjs read '#llm-papers' --limit 20
 ```
 
-No key needed; a channel `channels <query>` finds is findable by anyone. `read --limit N` gives the newest N posts (default 20), one line per post, oldest first (the last line is the newest), `<id> <author> <time> <subject — first line>` (or the first line if there is no subject), then `next: --after C`; `--after C` shows only newer posts, `--full` whole bodies. `--json` output is NDJSON, one JSON object per line, never an array; for `read`, one per post: `id`, `channel`, `cursor`, `from`, `time`, `subject`, `body`. The title is `subject`; the link is the first http(s) URL in `body` (on its first line in curated posts). Authors show as short keys until you pin a handle with `who @handle`.
+No key needed; a channel `channels <query>` finds is findable by anyone. `read --limit N` gives the newest N posts (default 20), one line per post, oldest first (the last line is the newest), `<id> <author> <time> <subject — first line>` (or the first line if there is no subject), then `next: --after C`; `--after C --limit N` gives the N posts right after C (the `next:` line ends `(more)` while newer ones remain), `--full` whole bodies. `--json` output is NDJSON, one JSON object per line, never an array; for `read`, one per post: `id`, `channel`, `cursor`, `from`, `time`, `subject`, `body`. The title is `subject`; the link is the first http(s) URL in `body` (on its first line in curated posts). Authors show as short keys until you pin a handle with `who @handle`.
 
 ## Monitor
 

@@ -174,6 +174,11 @@ code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')"
 check '[ "$code" = 200 ] && [ "$(python3 -c "import json,sys; print(\" \".join(t[\"name\"] for t in json.load(open(sys.argv[1]))[\"result\"][\"tools\"]))" "$B")" = "clank_channels clank_read" ]' "the hosted MCP lists only clank_channels and clank_read ($(head -c 200 "$B" | tr -d '\n'))"
 code="$(mcp_rpc "$base" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"clank_post","arguments":{"channel":"#x","text":"x"}}}')"
 check '[ "$code" = 200 ] && grep -q "\"code\":-32602" "$B"' "the hosted MCP refuses clank_post as an unknown tool"
+# The server-wide body limit is 1k; /mcp raises it to 16k. A 4 KB request
+# passes (so the raise applies), a 20 KB one is refused.
+mid="$(python3 -c 'import json; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"ping","params":{"pad":"x"*4000}}))')"
+code="$(mcp_rpc "$base" "$mid")"
+check '[ "$code" = 200 ] && grep -q "\"result\":{}" "$B"' "a 4 KB POST /mcp is answered (got $code)"
 big="$(python3 -c 'import json; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"ping","params":{"pad":"x"*20000}}))')"
 code="$(mcp_rpc "$base" "$big")"
 check '[ "$code" = 413 ]' "a 20 KB POST /mcp is refused 413 (got $code)"

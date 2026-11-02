@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestClankFirstDigestHint(t *testing.T) {
@@ -76,7 +79,8 @@ func TestClankAPILatest(t *testing.T) {
 	url := startHTTPMCP(t, a)
 	base := strings.TrimSuffix(url, "/mcp")
 	code, items, hdr := getLatest(t, base, "?c="+strings.Join([]string{news, plain, evil, secret, unknown}, ","))
-	if code != 200 || hdr.Get("Content-Type") != "application/json" {
+	// Cached in process only: browsers are told not to store it.
+	if code != 200 || hdr.Get("Content-Type") != "application/json" || hdr.Get("Cache-Control") != "no-store" {
 		t.Fatalf("latest: HTTP %d %v", code, hdr)
 	}
 	got := map[string]latestItem{}
@@ -131,6 +135,69 @@ func TestClankAPILatest(t *testing.T) {
 	base2 := strings.TrimSuffix(startHTTPMCP(t, fresh), "/mcp")
 	if _, items, _ := getLatest(t, base2, "?c="+news); len(items) != 1 || items[0].Title != "Newer news" {
 		t.Fatalf("uncached: %+v, want Newer news", items)
+	}
+}
+
+// TestClankAPILatestOwnSlots: a flood of slow /api/latest requests takes
+// /api/latest's own in-flight slots, never /mcp's.
+func TestClankAPILatestOwnSlots(t *testing.T) {
+	bh := startBigHub(t, 10, 3*time.Second)
+	a := bigAgent(t, bh)
+	url := startHTTPMCP(t, a)
+	base := strings.TrimSuffix(url, "/mcp")
+	var wg sync.WaitGroup
+	var busy atomic.Int64
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if code, _, _ := getLatest(t, base, "?c="+bh.channel); code == 429 {
+				busy.Add(1)
+			}
+		}()
+	}
+	time.Sleep(500 * time.Millisecond) // the accepted ones now wait on the slow hub
+	code, m := postRPC(t, url, rpcBody(1, "server/discover", withMeta(nil)), nil)
+	wg.Wait()
+	if code != 200 || m["result"] == nil {
+		t.Fatalf("/mcp while /api/latest is saturated: HTTP %d %v", code, m)
+	}
+	if busy.Load() != 5 {
+		t.Fatalf("%d of 8 concurrent /api/latest requests got 429, want 5 (3 in flight)", busy.Load())
+	}
+}
+
+// TestClankAPILatestCache: random ids cannot evict a real channel, and
+// concurrent requests for one channel share one hub fetch.
+func TestClankAPILatestCache(t *testing.T) {
+	bh := startBigHub(t, 10, 500*time.Millisecond)
+	a := bigAgent(t, bh)
+	a.env = append(a.env, "CLANK_LATEST_CACHE_MAX=16")
+	base := strings.TrimSuffix(startHTTPMCP(t, a), "/mcp")
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); getLatest(t, base, "?c="+bh.channel) }()
+	}
+	wg.Wait()
+	if n := bh.lookups.Load(); n != 1 {
+		t.Fatalf("3 concurrent requests for one channel made %d hub lookups, want 1", n)
+	}
+	// 40 ids the hub does not know (more than the cache holds).
+	for r := 0; r < 5; r++ {
+		ids := make([]string, 8)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("c_%s%c%c", strings.Repeat("q", 50), 'a'+rune(r), 'a'+rune(i))
+		}
+		if code, _, _ := getLatest(t, base, "?c="+strings.Join(ids, ",")); code != 200 {
+			t.Fatalf("flood request %d: HTTP %d", r, code)
+		}
+	}
+	if code, items, _ := getLatest(t, base, "?c="+bh.channel); code != 200 || len(items) != 1 {
+		t.Fatalf("after the flood: HTTP %d %+v", code, items)
+	}
+	if n := bh.lookups.Load(); n != 1 {
+		t.Fatalf("the flood evicted the channel: %d hub lookups within one TTL, want 1", n)
 	}
 }
 

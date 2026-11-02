@@ -143,7 +143,7 @@ function intOpt(v, name, lo, hi, dflt) {
 function cursorOpt(v) {
   if (v === undefined || v === null || v === "") return "";
   const s = String(v);
-  if (!/^[0-9]{1,19}$/.test(s)) throw usage("--after must be a cursor from a previous 'next:' line");
+  if (!/^[0-9]{1,19}$/.test(s)) throw usage(MODE === "mcp" ? "after must be the C of a previous 'cursor: C' line" : "--after must be a cursor from a previous 'next:' line");
   return s;
 }
 
@@ -1182,12 +1182,32 @@ const HTTP_MAX_INFLIGHT = 8;
 // ── GET /api/latest: the landing page's latest-post previews ─────
 // The newest verified post of each public channel asked for, cleaned, with
 // a title (its subject, else its first line) and its first http(s) link. At
-// most LATEST_MAX c_ ids per request; each answer is cached LATEST_TTL ms in
-// process (also when a channel has none or fails), so page views cost the
-// hub at most one lookup per channel per minute.
+// most LATEST_MAX c_ ids per request. Each channel's answer is cached
+// LATEST_TTL ms in process (also when it has no post, or failed), in a
+// bounded LRU map; ids the hub does not know go to a separate bounded map,
+// so a flood of random ids cannot evict real channels. Concurrent requests
+// for one channel share one hub fetch. Page views therefore cost the hub at
+// most one lookup per channel per TTL.
 const LATEST_MAX = 8;
 const LATEST_TTL = Number(process.env.CLANK_LATEST_TTL_MS) > 0 ? Number(process.env.CLANK_LATEST_TTL_MS) : 60000;
-const latestCache = new Map();
+const LATEST_CACHE_MAX = Number(process.env.CLANK_LATEST_CACHE_MAX) > 0 ? Number(process.env.CLANK_LATEST_CACHE_MAX) : 512;
+const latestCache = new Map();   // c_id -> { at, item }, least recently used first
+const latestUnknown = new Map(); // c_id -> { at }: the hub answered 404
+const latestPending = new Map(); // c_id -> the one in-flight fetch
+
+function lruGet(map, k) {
+  const e = map.get(k);
+  if (!e) return undefined;
+  map.delete(k);
+  if (Date.now() - e.at >= LATEST_TTL) return undefined;
+  map.set(k, e);
+  return e;
+}
+function lruSet(map, k, e) {
+  map.delete(k);
+  map.set(k, e);
+  while (map.size > LATEST_CACHE_MAX) map.delete(map.keys().next().value);
+}
 
 function previewOf(ch, p) {
   const lines = cleanText(p.body).split("\n").map(l => l.trim()).filter(Boolean);
@@ -1203,24 +1223,35 @@ function previewOf(ch, p) {
   return { channel: ch.id, slug: ch.slug, id: p.id, ts: p.ts, title, link };
 }
 
-async function latestItem(ctx, cid, signal) {
-  const hit = latestCache.get(cid);
-  if (hit && Date.now() - hit.at < LATEST_TTL) return hit.item;
-  let item = null;
-  try {
-    const c = { ...ctx, channels: {}, signal };
-    const ch = await resolveChannel(c, cid);
-    if (ch.read === "public") {
-      const r = await recentPosts(c, ch, posts => posts.length >= 1, 1);
-      const post = r.posts[r.posts.length - 1];
-      if (post) item = previewOf(ch, post);
-    }
-  } catch (e) {
-    if (signal?.aborted) throw e; // timed out: not cached
+async function latestItem(ctx, cid) {
+  const hit = lruGet(latestCache, cid);
+  if (hit) return hit.item;
+  if (lruGet(latestUnknown, cid)) return null;
+  let p = latestPending.get(cid);
+  if (!p) {
+    // Its own deadline, not a requester's: other requests may share it.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10000);
+    p = (async () => {
+      let item = null;
+      try {
+        const c = { ...ctx, channels: {}, signal: ac.signal };
+        const ch = await resolveChannel(c, cid);
+        if (ch.read === "public") {
+          const r = await recentPosts(c, ch, posts => posts.length >= 1, 1);
+          const post = r.posts[r.posts.length - 1];
+          if (post) item = previewOf(ch, post);
+        }
+      } catch (e) {
+        if (ac.signal.aborted) return null; // timed out: not cached
+        if (e instanceof ClankError && e.code === "E_NOT_FOUND") { lruSet(latestUnknown, cid, { at: Date.now() }); return null; }
+      }
+      lruSet(latestCache, cid, { at: Date.now(), item });
+      return item;
+    })().finally(() => { clearTimeout(timer); latestPending.delete(cid); });
+    latestPending.set(cid, p);
   }
-  if (latestCache.size >= 512) latestCache.clear();
-  latestCache.set(cid, { at: Date.now(), item });
-  return item;
+  return p;
 }
 
 function runHttpMCP(ctx, opt) {
@@ -1251,7 +1282,10 @@ function runHttpMCP(ctx, opt) {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
     res.end(body === null ? "" : JSON.stringify(body));
   };
-  // /api/latest has its own budget, so page views cannot starve /mcp.
+  // /api/latest has its own request budget and its own in-flight cap, so
+  // page views (or a flood of them) never use /mcp's slots or tokens.
+  const LATEST_INFLIGHT = 3;
+  let latestInflight = 0;
   let lTokens = 40, lLast = Date.now();
   const takeLatest = () => {
     const now = Date.now();
@@ -1271,17 +1305,22 @@ function runHttpMCP(ctx, opt) {
     if (!ids.length || ids.length > LATEST_MAX || ids.some(id => !CID.test(id)) || [...q.keys()].some(k => k !== "c")) {
       return reply(res, 400, { error: "want ?c= with 1-" + LATEST_MAX + " comma-separated c_ channel ids" });
     }
-    if (inflight >= HTTP_MAX_INFLIGHT || !takeLatest()) return reply(res, 429, { error: "busy: retry in a few seconds" }, { "Retry-After": "2" });
-    inflight++;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 10000);
-    res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+    if (latestInflight >= LATEST_INFLIGHT || !takeLatest()) return reply(res, 429, { error: "busy: retry in a few seconds" }, { "Retry-After": "2" });
+    latestInflight++;
+    let timer;
     try {
-      const items = (await Promise.all(ids.map(id => latestItem(ctx, id, ac.signal)))).filter(Boolean);
-      reply(res, 200, { items }, { "Cache-Control": "public, max-age=60" });
+      // Each channel's fetch has its own 10 s deadline (latestItem); the
+      // request gives up at 11 s whatever happens.
+      const items = await Promise.race([
+        Promise.all(ids.map(id => latestItem(ctx, id))).then(all => all.filter(Boolean)),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("timeout")), 11000); }),
+      ]);
+      // The answer is cached here, in process, not by browsers: this reply
+      // says no-store, and nginx replaces that with the site's no-transform.
+      reply(res, 200, { items });
     } catch {
       reply(res, 504, { error: "timed out" });
-    } finally { clearTimeout(timer); inflight--; }
+    } finally { clearTimeout(timer); latestInflight--; }
   };
   const server = http.createServer((req, res) => {
     const url = req.url || "";

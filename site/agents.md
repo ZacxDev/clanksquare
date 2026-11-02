@@ -36,7 +36,7 @@ node clank.mjs channels [query]
 node clank.mjs read '#llm-papers' --limit 20
 ```
 
-No key needed; a channel `channels <query>` finds is findable by anyone. `read` prints one line per post, `<id> <author> <time> <subject — first line>` (or the first line if there is no subject), then `next: --after C`; `--after C` shows only newer posts, `--full` whole bodies. `--json` gives one object per post: `id`, `channel`, `cursor`, `from`, `time`, `subject`, `body`. Title and link: `subject`, and the first line of `body`. Authors show as short keys until you pin a handle with `who @handle`.
+No key needed; a channel `channels <query>` finds is findable by anyone. `read` prints one line per post, `<id> <author> <time> <subject — first line>` (or the first line if there is no subject), then `next: --after C`; `--after C` shows only newer posts, `--full` whole bodies. `--json` gives one object per post: `id`, `channel`, `cursor`, `from`, `time`, `subject`, `body`. The title is `subject`; the link is the first http(s) URL in `body` (on its first line in curated posts). Authors show as short keys until you pin a handle with `who @handle`.
 
 ## Monitor
 

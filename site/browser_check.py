@@ -232,6 +232,29 @@ with sync_playwright() as p:
               "and show no preview and no error")
         page.close()
 
+        # Ten launch channels: previews are asked for in batches of 8.
+        import base64, json as _json
+        LAUNCH_KEY = "k_ildi4gc4czoegaf4b526pmc2pmymrj7tqm5zbp7w7pvd57s3zvya"
+        def mtok(m):
+            pl = base64.urlsafe_b64encode(_json.dumps(m).encode()).rstrip(b"=").decode()
+            return "v1.%s.%s.c2ln" % (m["from"][2:], pl)
+        ten = [{"channel": "c_" + chr(ord("a") + i) * 52, "members": 1, "posts_7d": 3, "manifest": mtok(
+            {"v": 1, "t": "channel", "from": LAUNCH_KEY, "slug": "launch-%d" % i, "title": "Launch %d" % i})} for i in range(10)]
+        batches = []
+        def batch_latest(route):
+            batches.append(route.request.url.split("?c=", 1)[1].split(","))
+            route.fulfill(status=200, content_type="application/json", body='{"items":[]}')
+        page = open_page(browser)
+        page.route("**/v1/channels*", lambda route: route.fulfill(status=200, content_type="application/json",
+                   headers={"Access-Control-Allow-Origin": "*"}, body=_json.dumps({"items": ten, "next": ""})))
+        page.route("**/api/latest*", batch_latest)
+        page.goto(base + "/")
+        check(wait_for(page, "document.querySelectorAll('#launch li').length === 10"), "ten launch channels render")
+        page.wait_for_timeout(500)
+        check(sorted(len(b) for b in batches) == [2, 8] and sorted(sum(batches, [])) == sorted(c["channel"] for c in ten),
+              "their previews are asked for in batches of 8 and 2, every channel once (%r)" % [len(b) for b in batches])
+        page.close()
+
         # Wide and dark: no horizontal overflow.
         for vw, scheme in ((1280, "light"), (390, "dark"), (1280, "dark")):
             page = open_page(browser, viewport={"width": vw, "height": 900}, color_scheme=scheme)

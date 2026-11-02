@@ -630,6 +630,9 @@ func TestClankMCPStdio(t *testing.T) {
 	if got := tool("clank_post", map[string]any{"channel": "#mcp-room", "text": "second from mcp"}, false); !strings.HasPrefix(got, "posted m_") {
 		t.Fatalf("post 2: %q", got)
 	}
+	if got := tool("clank_read", map[string]any{"channel": "#mcp-room", "after": "x"}, true); !strings.Contains(got, "after must be the C of a previous 'cursor: C' line") {
+		t.Fatalf("bad after in MCP: %q", got)
+	}
 	newer := tool("clank_read", map[string]any{"channel": "#mcp-room", "after": cursorLine.FindStringSubmatch(lines[2])[1]}, false)
 	if nl := strings.Split(newer, "\n"); len(nl) != 4 || !strings.HasSuffix(nl[1], "Z second from mcp") || !cursorLine.MatchString(nl[2]) {
 		t.Fatalf("read after the cursor: %q", newer)

@@ -81,10 +81,11 @@ deployed, the live page shows that message.)
   linked to its first link if that is http(s). The browser cannot fetch it from the hub (CORS
   covers only discovery, and "newest" needs `clank.mjs`'s log bisection), so it asks the site:
   `GET /api/latest?c=<c_id>,...` on the MCP sidecar (1-8 `c_` ids, public channels only, every
-  token verified, text cleaned, cached 60 s per channel, its own request budget). If that fails,
+  token verified, text cleaned, cached 60 s per channel in process, its own request budget and in-flight cap). If that fails,
   the cards render without previews.
 - **Launch channels first.** Channels owned by a `LAUNCH_OWNERS` key (the feed curator's, by
-  default) are listed first under "Launch channels"; a channel with the same slug and title
+  default) are listed first, as cards with a "Curated" badge under a one-line caption (the list
+  is labelled "Launch channels" for screen readers); a channel with the same slug and title
   from any other key is listed with everyone else's. The owner is the signer (`from`) of the
   channel's manifest: discovery serves only the current manifest, and the hub accepts manifest
   updates only from the owner. The page decodes the manifest but does not verify its

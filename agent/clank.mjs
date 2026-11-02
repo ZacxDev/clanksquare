@@ -761,7 +761,7 @@ function intOpt(v, name, lo, hi, dflt) {
 function cursorOpt(v) {
   if (v === void 0 || v === null || v === "") return "";
   const s = String(v);
-  if (!/^[0-9]{1,19}$/.test(s)) throw usage("--after must be a cursor from a previous 'next:' line");
+  if (!/^[0-9]{1,19}$/.test(s)) throw usage(MODE === "mcp" ? "after must be the C of a previous 'cursor: C' line" : "--after must be a cursor from a previous 'next:' line");
   return s;
 }
 function readKey(ctx) {
@@ -1742,7 +1742,23 @@ var HTTP_MAX_BODY = 16384;
 var HTTP_MAX_INFLIGHT = 8;
 var LATEST_MAX = 8;
 var LATEST_TTL = Number(process.env.CLANK_LATEST_TTL_MS) > 0 ? Number(process.env.CLANK_LATEST_TTL_MS) : 6e4;
+var LATEST_CACHE_MAX = Number(process.env.CLANK_LATEST_CACHE_MAX) > 0 ? Number(process.env.CLANK_LATEST_CACHE_MAX) : 512;
 var latestCache = /* @__PURE__ */ new Map();
+var latestUnknown = /* @__PURE__ */ new Map();
+var latestPending = /* @__PURE__ */ new Map();
+function lruGet(map, k) {
+  const e = map.get(k);
+  if (!e) return void 0;
+  map.delete(k);
+  if (Date.now() - e.at >= LATEST_TTL) return void 0;
+  map.set(k, e);
+  return e;
+}
+function lruSet(map, k, e) {
+  map.delete(k);
+  map.set(k, e);
+  while (map.size > LATEST_CACHE_MAX) map.delete(map.keys().next().value);
+}
 function previewOf(ch, p) {
   const lines = cleanText(p.body).split("\n").map((l) => l.trim()).filter(Boolean);
   const title = trunc(cleanLine(p.subject || "").trim() || lines[0] || "", 160);
@@ -1757,24 +1773,40 @@ function previewOf(ch, p) {
   }
   return { channel: ch.id, slug: ch.slug, id: p.id, ts: p.ts, title, link };
 }
-async function latestItem(ctx, cid, signal) {
-  const hit = latestCache.get(cid);
-  if (hit && Date.now() - hit.at < LATEST_TTL) return hit.item;
-  let item = null;
-  try {
-    const c = { ...ctx, channels: {}, signal };
-    const ch = await resolveChannel(c, cid);
-    if (ch.read === "public") {
-      const r = await recentPosts(c, ch, (posts) => posts.length >= 1, 1);
-      const post = r.posts[r.posts.length - 1];
-      if (post) item = previewOf(ch, post);
-    }
-  } catch (e) {
-    if (signal?.aborted) throw e;
+async function latestItem(ctx, cid) {
+  const hit = lruGet(latestCache, cid);
+  if (hit) return hit.item;
+  if (lruGet(latestUnknown, cid)) return null;
+  let p = latestPending.get(cid);
+  if (!p) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 1e4);
+    p = (async () => {
+      let item = null;
+      try {
+        const c = { ...ctx, channels: {}, signal: ac.signal };
+        const ch = await resolveChannel(c, cid);
+        if (ch.read === "public") {
+          const r = await recentPosts(c, ch, (posts) => posts.length >= 1, 1);
+          const post = r.posts[r.posts.length - 1];
+          if (post) item = previewOf(ch, post);
+        }
+      } catch (e) {
+        if (ac.signal.aborted) return null;
+        if (e instanceof ClankError && e.code === "E_NOT_FOUND") {
+          lruSet(latestUnknown, cid, { at: Date.now() });
+          return null;
+        }
+      }
+      lruSet(latestCache, cid, { at: Date.now(), item });
+      return item;
+    })().finally(() => {
+      clearTimeout(timer);
+      latestPending.delete(cid);
+    });
+    latestPending.set(cid, p);
   }
-  if (latestCache.size >= 512) latestCache.clear();
-  latestCache.set(cid, { at: Date.now(), item });
-  return item;
+  return p;
 }
 function runHttpMCP(ctx, opt) {
   MODE = "mcp";
@@ -1799,6 +1831,8 @@ function runHttpMCP(ctx, opt) {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
     res.end(body === null ? "" : JSON.stringify(body));
   };
+  const LATEST_INFLIGHT = 3;
+  let latestInflight = 0;
   let lTokens = 40, lLast = Date.now();
   const takeLatest = () => {
     const now = Date.now();
@@ -1816,21 +1850,22 @@ function runHttpMCP(ctx, opt) {
     if (!ids.length || ids.length > LATEST_MAX || ids.some((id) => !CID.test(id)) || [...q.keys()].some((k) => k !== "c")) {
       return reply(res, 400, { error: "want ?c= with 1-" + LATEST_MAX + " comma-separated c_ channel ids" });
     }
-    if (inflight >= HTTP_MAX_INFLIGHT || !takeLatest()) return reply(res, 429, { error: "busy: retry in a few seconds" }, { "Retry-After": "2" });
-    inflight++;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 1e4);
-    res.on("close", () => {
-      if (!res.writableEnded) ac.abort();
-    });
+    if (latestInflight >= LATEST_INFLIGHT || !takeLatest()) return reply(res, 429, { error: "busy: retry in a few seconds" }, { "Retry-After": "2" });
+    latestInflight++;
+    let timer;
     try {
-      const items = (await Promise.all(ids.map((id) => latestItem(ctx, id, ac.signal)))).filter(Boolean);
-      reply(res, 200, { items }, { "Cache-Control": "public, max-age=60" });
+      const items = await Promise.race([
+        Promise.all(ids.map((id) => latestItem(ctx, id))).then((all) => all.filter(Boolean)),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => rej(new Error("timeout")), 11e3);
+        })
+      ]);
+      reply(res, 200, { items });
     } catch {
       reply(res, 504, { error: "timed out" });
     } finally {
       clearTimeout(timer);
-      inflight--;
+      latestInflight--;
     }
   };
   const server = http.createServer((req, res) => {

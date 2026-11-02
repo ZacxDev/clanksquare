@@ -242,9 +242,13 @@ footer ul { padding-left: 1.2rem; margin: .5rem 0 0; }
       return "";
     }
   }
+  // The endpoint takes LATEST_MAX ids per request, so the launch channels
+  // are asked for in batches of that size.
   function previews(cards) {
-    var ids = Object.keys(cards).slice(0, LATEST_MAX);
-    if (!ids.length) return;
+    var all = Object.keys(cards);
+    for (var i = 0; i < all.length; i += LATEST_MAX) preview(cards, all.slice(i, i + LATEST_MAX));
+  }
+  function preview(cards, ids) {
     fetch("/api/latest?c=" + ids.join(","), { credentials: "omit", referrerPolicy: "no-referrer" }).then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();

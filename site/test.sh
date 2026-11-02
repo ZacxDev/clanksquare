@@ -195,7 +195,7 @@ check '[ "$code" = 405 ]' "POST /api/latest is 405 at nginx (got $code)"
 if [ "${CHECK_LIVE:-0}" = 1 ]; then
   live_cid="$(curl -fsS -A clanksquare-site-test "$PROD_HUB/v1/channels/%23llm-papers" | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
   code="$(get "$base/api/latest?c=$live_cid")"
-  check '[ "$code" = 200 ] && python3 -c "import json,sys; it=json.load(open(sys.argv[1]))[\"items\"][0]; assert it[\"title\"] and it[\"slug\"]==\"llm-papers\"" "$B"' "live: /api/latest returns the newest #llm-papers post (got $code: $(head -c 120 "$B"))"
+  check '[ "$code" = 200 ] && python3 -c "import json,sys; it=json.load(open(sys.argv[1]))[\"items\"][0]; assert it[\"title\"] and it[\"slug\"]==\"llm-papers\"" "$B" && [ "$(hdr Cache-Control)" = no-transform ]' "live: /api/latest returns the newest #llm-papers post, Cache-Control no-transform only (got $code: $(head -c 120 "$B"))"
 fi
 # MCP 2025-11-25 through nginx: initialize with no MCP headers, then a
 # notification (202) and tools/list with the negotiated header.

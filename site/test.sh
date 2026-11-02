@@ -175,7 +175,7 @@ for _ in $(seq 1 50); do
   [ "$(mcp_rpc "$base" server/discover "$DISCOVER")" = 200 ] && break; sleep 0.2
 done
 code="$(mcp_rpc "$base" server/discover "$DISCOVER")"
-check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"resultType\"]==\"complete\" and r[\"supportedVersions\"]==[\"2026-07-28\"] and r[\"_meta\"][\"io.modelcontextprotocol/serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp server/discover reaches the sidecar (got $code: $(head -c 120 "$B"))"
+check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"resultType\"]==\"complete\" and r[\"supportedVersions\"]==[\"2026-07-28\",\"2025-11-25\",\"2025-06-18\"] and r[\"_meta\"][\"io.modelcontextprotocol/serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp server/discover reaches the sidecar (got $code: $(head -c 120 "$B"))"
 check '[[ "$(hdr Content-Type)" == application/json* ]] && [ "$(hdr Cache-Control)" = no-transform ] && [ -n "$(hdr Content-Security-Policy)" ]' "  ... JSON, with the site's headers"
 code="$(mcp_rpc "$base" tools/list '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{'"$MCP_META"'}}')"
 check '[ "$code" = 200 ] && [ "$(python3 -c "import json,sys; print(\" \".join(t[\"name\"] for t in json.load(open(sys.argv[1]))[\"result\"][\"tools\"]))" "$B")" = "clank_channels clank_read" ]' "the hosted MCP lists only clank_channels and clank_read ($(head -c 200 "$B" | tr -d '\n'))"
@@ -184,6 +184,14 @@ check '[ "$code" = 200 ] && grep -q "\"code\":-32602" "$B"' "the hosted MCP refu
 # The Mcp-Method header reaches the sidecar through nginx: a mismatch is its 400 HeaderMismatch.
 code="$(mcp_rpc "$base" tools/list "$DISCOVER")"
 check '[ "$code" = 400 ] && grep -q "\"code\":-32020" "$B"' "an Mcp-Method that does not match the body is 400 HeaderMismatch through nginx (got $code)"
+# MCP 2025-11-25 through nginx: initialize with no MCP headers, then a
+# notification (202) and tools/list with the negotiated header.
+code="$(get -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}' "$base/mcp")"
+check '[ "$code" = 200 ] && grep -q "\"protocolVersion\":\"2025-11-25\"" "$B" && [ -z "$(hdr Mcp-Session-Id)" ]' "MCP 2025-11-25 initialize through nginx answers 2025-11-25, with no session id (got $code: $(head -c 100 "$B"))"
+code="$(get -X POST -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2025-11-25' --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$base/mcp")"
+check '[ "$code" = 202 ]' "MCP 2025-11-25 notifications/initialized is 202 (got $code)"
+code="$(get -X POST -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2025-11-25' --data '{"jsonrpc":"2.0","id":6,"method":"tools/list"}' "$base/mcp")"
+check '[ "$code" = 200 ] && [ "$(python3 -c "import json,sys; print(\" \".join(t[\"name\"] for t in json.load(open(sys.argv[1]))[\"result\"][\"tools\"]))" "$B")" = "clank_channels clank_read" ]' "MCP 2025-11-25 tools/list through nginx lists clank_channels and clank_read"
 # The server-wide body limit is 1k; /mcp raises it to 16k. A 4 KB request
 # passes (so the raise applies), a 20 KB one is refused.
 pad() { python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":4,"method":"server/discover","params":{"pad":"x"*int(sys.argv[1]),"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}))' "$1"; }

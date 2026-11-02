@@ -188,6 +188,19 @@ func TestClankCLI(t *testing.T) {
 	a := newAgent(t, h)
 	b := newAgent(t, h)
 
+	// whoami before init: the configuration a write would use, and no key.
+	if got := a.ok("whoami"); got != "key=none handle=none hub="+h.URL+" hub_name="+hubName+" key_file="+a.key+" (no key yet: run node clank.mjs init)\n" {
+		t.Fatalf("whoami before init: %q", got)
+	}
+	if _, err := os.Stat(a.key); !os.IsNotExist(err) {
+		t.Fatal("whoami created a key")
+	}
+	// --key overrides the key file, and whoami reports it.
+	alt := filepath.Join(t.TempDir(), "alt", "key")
+	if got := a.ok("whoami", "--key", alt, "--json"); !strings.Contains(got, `"key_file":"`+alt+`"`) || !strings.Contains(got, `"key_exists":false`) || !strings.Contains(got, `"state_file":"`+alt+`.state.json"`) || !strings.Contains(got, `"hub_name":"`+hubName+`"`) {
+		t.Fatalf("whoami --key --json: %q", got)
+	}
+
 	// init: creates the key once, prints only its id, never the seed.
 	idA := a.ok("init")
 	if !keyLine.MatchString(idA) {
@@ -212,7 +225,7 @@ func TestClankCLI(t *testing.T) {
 	if got := a.ok("name", "alice"); got != "@alice\n" {
 		t.Fatalf("name: %q", got)
 	}
-	if got := a.ok("whoami"); got != "key="+strings.TrimSpace(idA)+" handle=@alice hub="+h.URL+"\n" {
+	if got := a.ok("whoami"); got != "key="+strings.TrimSpace(idA)+" handle=@alice hub="+h.URL+" hub_name="+hubName+" key_file="+a.key+"\n" {
 		t.Fatalf("whoami: %q", got)
 	}
 	b.fails("E_FORBIDDEN", "@alice is taken", "name", "alice")
@@ -223,11 +236,15 @@ func TestClankCLI(t *testing.T) {
 		t.Fatalf("create: %q", created)
 	}
 	b.fails("E_FORBIDDEN", "#sandbox is taken", "create", "sandbox", "--title", "Mine")
+	// create also takes #slug, like every other channel verb.
+	if got := a.ok("create", "#hashed", "--title", "Hashed"); !strings.HasPrefix(got, "created #hashed c_") {
+		t.Fatalf("create #hashed: %q", got)
+	}
 	a.fails("E_QUERY", "bad slug", "create", "Bad_Slug", "--title", "x")
 
 	// channels: no key needed, the new channel is listed.
 	anon := newAgent(t, h)
-	if got := anon.ok("channels"); !strings.HasPrefix(got, "#sandbox members=1 posts_7d=0 post=members — Sandbox: Test posting here.\n") {
+	if got := anon.ok("channels"); !strings.Contains(got, "#sandbox members=1 posts_7d=0 post=members — Sandbox: Test posting here.\n") || !strings.Contains(got, "#hashed members=1 ") {
 		t.Fatalf("channels: %q", got)
 	}
 	if _, err := os.Stat(anon.key); !os.IsNotExist(err) {
@@ -242,7 +259,7 @@ func TestClankCLI(t *testing.T) {
 	a.fails("E_USAGE", "--limit must be", "read", "#sandbox", "--limit", "0")
 
 	// B subscribes before anything is posted (a sub covers later posts only).
-	if got := b.ok("sub", "#sandbox"); got != "subscribed #sandbox\n" {
+	if got := b.ok("sub", "#sandbox"); got != "subscribed #sandbox (digest shows posts from now on)\n" {
 		t.Fatalf("sub: %q", got)
 	}
 	b.fails("E_FORBIDDEN", "already subscribed to #sandbox", "sub", "#sandbox")
@@ -527,14 +544,20 @@ func checkProtocolGuards(t *testing.T, send func(method string, params any) map[
 	t.Helper()
 	// server/discover (MUST): versions, capabilities, identity, cache hints.
 	d := completeResult(t, send("server/discover", withMeta(nil)))
-	if v, _ := d["supportedVersions"].([]any); len(v) != 1 || v[0] != mcpVersion || d["capabilities"].(map[string]any)["tools"] == nil || d["ttlMs"] == nil || d["cacheScope"] != "public" {
+	if v, _ := d["supportedVersions"].([]any); fmt.Sprint(v) != "[2026-07-28 2025-11-25 2025-06-18]" || d["capabilities"].(map[string]any)["tools"] == nil || d["ttlMs"] == nil || d["cacheScope"] != "public" {
 		t.Fatalf("server/discover: %v", d)
 	}
-	// An unsupported version: -32022 listing what is supported.
+	// A version the server does not support at all: -32022 listing what is supported.
 	old := withMeta(nil)
-	old["_meta"].(map[string]any)["io.modelcontextprotocol/protocolVersion"] = "2025-11-25"
-	if code, data := rpcErr(t, send("tools/list", old)); code != -32022 || fmt.Sprint(data["supported"]) != "[2026-07-28]" || data["requested"] != "2025-11-25" {
-		t.Fatalf("old version: %v %v", code, data)
+	old["_meta"].(map[string]any)["io.modelcontextprotocol/protocolVersion"] = "1900-01-01"
+	if code, data := rpcErr(t, send("tools/list", old)); code != -32022 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25 2025-06-18]" || data["requested"] != "1900-01-01" {
+		t.Fatalf("unsupported version: %v %v", code, data)
+	}
+	// 2025-11-25 is supported, but through initialize: in _meta it is an era mix.
+	mixed := withMeta(nil)
+	mixed["_meta"].(map[string]any)["io.modelcontextprotocol/protocolVersion"] = "2025-11-25"
+	if code, _ := rpcErr(t, send("tools/list", mixed)); code != -32602 {
+		t.Fatalf("2025-11-25 in _meta: %v", code)
 	}
 	// No _meta at all: malformed, -32602.
 	if code, _ := rpcErr(t, send("tools/list", map[string]any{})); code != -32602 {
@@ -545,9 +568,9 @@ func checkProtocolGuards(t *testing.T, send func(method string, params any) map[
 	if code, _ := rpcErr(t, send("tools/list", noCaps)); code != -32602 {
 		t.Fatalf("missing clientCapabilities: %v", code)
 	}
-	// A legacy initialize is refused, naming the supported version.
-	if code, data := rpcErr(t, send("initialize", map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}})); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28]" {
-		t.Fatalf("initialize: %v %v", code, data)
+	// initialize carrying 2026-07-28 _meta mixes the eras: refused, naming both.
+	if code, data := rpcErr(t, send("initialize", withMeta(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}}))); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25 2025-06-18]" {
+		t.Fatalf("initialize with _meta: %v %v", code, data)
 	}
 	// ping was removed in this revision.
 	if code, _ := rpcErr(t, send("ping", withMeta(nil))); code != -32601 {
@@ -612,7 +635,7 @@ func TestClankMCPStdio(t *testing.T) {
 		t.Fatalf("bad slug: %q", got)
 	}
 	// Monitoring over MCP: subscribe, someone posts, the digest has it.
-	if got := tool("clank_subscribe", map[string]any{"channel": "#closed"}, false); got != "subscribed #closed" {
+	if got := tool("clank_subscribe", map[string]any{"channel": "#closed"}, false); got != "subscribed #closed (digest shows posts from now on)" {
 		t.Fatalf("subscribe: %q", got)
 	}
 	b.ok("post", "#closed", "news for subscribers")
@@ -725,7 +748,19 @@ func TestClankMCPHTTPReadOnly(t *testing.T) {
 
 	// The shared version rules, plus the HTTP status each one carries.
 	checkProtocolGuards(t, func(method string, params any) map[string]any {
-		code, m := postRPC(t, url, rpcBody(1, method, params), nil)
+		// These are 2026-07-28 requests: they say so in the header even when
+		// their _meta is missing (without it, a request is 2025-11-25).
+		body := rpcBody(1, method, params)
+		hd := stdHeaders(body)
+		hd["MCP-Protocol-Version"] = mcpVersion
+		if m, ok := params.(map[string]any); ok {
+			if meta, ok := m["_meta"].(map[string]any); ok {
+				if v, ok := meta["io.modelcontextprotocol/protocolVersion"].(string); ok {
+					hd["MCP-Protocol-Version"] = v
+				}
+			}
+		}
+		code, m := postRPC(t, url, body, hd)
 		e, _ := m["error"].(map[string]any)
 		want := 200
 		if e != nil {

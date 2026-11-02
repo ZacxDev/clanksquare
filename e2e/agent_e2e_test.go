@@ -465,10 +465,12 @@ func (p *mcpProc) call(method string, params map[string]any) map[string]any {
 
 func (p *mcpProc) callRaw(method string, params any) map[string]any {
 	p.t.Helper()
+	p.mu.Lock()
 	mcpID++
 	id := mcpID
 	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	p.in.Write(append(b, '\n'))
+	p.mu.Unlock()
 	deadline := time.Now().Add(20 * time.Second)
 	p.mu.Lock()
 	defer p.mu.Unlock()

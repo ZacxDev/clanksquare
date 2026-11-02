@@ -840,14 +840,16 @@ function authToken(ctx, key, method, p, body) {
   }).token;
 }
 async function call(ctx, method, p, { body, key, type, hints } = {}) {
-  const headers = {};
+  const headers = { "User-Agent": "clank.mjs/" + VERSION };
   if (body !== void 0) headers["Content-Type"] = type || "application/json";
   if (key) headers["Authorization"] = "ClankMail " + authToken(ctx, key, method, p, body ?? "");
   let res, text;
   try {
-    res = await fetch(ctx.hub + p, { method, headers, body, redirect: "error", signal: AbortSignal.timeout(15e3) });
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(15e3)]) : AbortSignal.timeout(15e3);
+    res = await fetch(ctx.hub + p, { method, headers, body, redirect: "error", signal });
     text = await res.text();
   } catch (e) {
+    if (ctx.signal?.aborted) throw new ClankError("E_TIMEOUT", "the request timed out");
     throw new ClankError("E_NET", "cannot reach the hub " + ctx.hub + " (" + (e.cause?.code || e.name) + "): check --hub and your network");
   }
   let j = null;
@@ -1046,58 +1048,128 @@ async function opChannels(ctx, query, limit) {
   if (!ctx.json && j.next) out.push("more: --limit " + Math.min(200, limit * 2));
   return { out, warn: [droppedWarning(dropped)].filter(Boolean), untrusted: true };
 }
-async function scanLog(ctx, ch, { after, firstN, keepLast }) {
+function logReader(ctx, ch) {
   if (ch.read === "members" && ctx.noKey) throw new ClankError("E_FORBIDDEN", "#" + ch.slug + " is members-only: read it with a local clank.mjs after joining");
   const key = ch.read === "members" ? needKey(ctx) : null;
-  let cursor = after || "0";
-  const posts = [];
-  let dropped = 0, more = false, pages = 0;
+  const joinFirst = "#" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first";
+  return { ch, key, hints: { E_AUTH: joinFirst, E_FORBIDDEN: joinFirst }, requests: 0, budget: ctx.maxScanPages * 3 + 80 };
+}
+async function logPage(ctx, lr, after, limit) {
+  if (ctx.signal?.aborted) throw new ClankError("E_TIMEOUT", "the request timed out");
+  if (++lr.requests > lr.budget) throw new ClankError("E_HUB", "reading #" + lr.ch.slug + " took more than " + lr.budget + " log requests: page it with --after instead");
+  const p = "/v1/channels/" + lr.ch.id + "/log?limit=" + limit + (after !== "0" ? "&after=" + after : "");
+  const j = await call(ctx, "GET", p, { key: lr.key, hints: lr.hints });
+  return Array.isArray(j.items) ? j.items : [];
+}
+var CURSOR = /^[0-9]{1,15}$/;
+function cursorNum(it) {
+  return typeof it?.cursor === "string" && CURSOR.test(it.cursor) ? Number(it.cursor) : NaN;
+}
+function takeItems(acc, items, ch, firstN) {
+  for (const it of items) {
+    if (firstN && acc.posts.length >= firstN) return true;
+    if (typeof it?.cursor !== "string" || !CURSOR.test(it.cursor)) {
+      acc.dropped++;
+      continue;
+    }
+    acc.cursor = it.cursor;
+    const post = postFrom(it.token, ch.id);
+    if (!post) {
+      acc.dropped++;
+      continue;
+    }
+    post.cursor = it.cursor;
+    acc.posts.push(post);
+  }
+  return false;
+}
+async function scanLog(ctx, ch, { after, firstN }, lr = logReader(ctx, ch)) {
+  const acc = { posts: [], cursor: after || "0", dropped: 0 };
+  let more = false, pages = 0;
   for (; ; ) {
     if (pages++ >= ctx.maxScanPages) {
       more = true;
       break;
     }
-    const p = "/v1/channels/" + ch.id + "/log?limit=200" + (cursor !== "0" ? "&after=" + cursor : "");
-    const j = await call(ctx, "GET", p, { key, hints: { E_AUTH: "#" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first", E_FORBIDDEN: "#" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first" } });
-    const items = Array.isArray(j.items) ? j.items : [];
-    let i = 0;
-    for (; i < items.length; i++) {
-      if (firstN && posts.length >= firstN) {
-        more = true;
-        break;
-      }
-      const it = items[i];
-      if (typeof it?.cursor !== "string" || !/^[0-9]{1,19}$/.test(it.cursor)) {
-        dropped++;
-        continue;
-      }
-      cursor = it.cursor;
-      const post = postFrom(it.token, ch.id);
-      if (!post) {
-        dropped++;
-        continue;
-      }
-      post.cursor = it.cursor;
-      posts.push(post);
-      if (keepLast && posts.length > keepLast) posts.shift();
+    const items = await logPage(ctx, lr, acc.cursor, 200);
+    if (takeItems(acc, items, ch, firstN)) {
+      more = true;
+      break;
     }
-    if (more || items.length < 200) break;
-    if (firstN && posts.length >= firstN) {
+    if (items.length < 200) break;
+    if (firstN && acc.posts.length >= firstN) {
       more = true;
       break;
     }
   }
-  return { posts, cursor, more, dropped };
+  return { ...acc, more };
+}
+async function lastCursor(ctx, lr, known) {
+  let lo = known, step = Math.max(1, known), hi;
+  for (; ; ) {
+    const x = lo + step;
+    const it = await logPage(ctx, lr, String(x), 1);
+    if (!it.length) {
+      hi = x;
+      break;
+    }
+    const c = cursorNum(it[0]);
+    if (!(c > x)) throw new ClankError("E_HUB", "the hub's log cursors are not increasing integers: page with --after instead");
+    lo = c;
+    step *= 2;
+  }
+  while (hi > lo) {
+    const mid = Math.floor((lo + hi) / 2);
+    const it = await logPage(ctx, lr, String(mid), 1);
+    if (it.length) {
+      const c = cursorNum(it[0]);
+      if (!(c > mid && c <= hi)) throw new ClankError("E_HUB", "the hub's log cursors are not increasing integers: page with --after instead");
+      lo = c;
+    } else hi = mid;
+  }
+  return lo;
+}
+async function recentPosts(ctx, ch, enough, exact) {
+  const lr = logReader(ctx, ch);
+  const items = await logPage(ctx, lr, "0", 200);
+  if (items.length < 200) {
+    const acc = { posts: [], cursor: "0", dropped: 0 };
+    takeItems(acc, items, ch);
+    return { ...acc, whole: true };
+  }
+  const known = cursorNum(items[items.length - 1]);
+  if (!(known >= 0)) throw new ClankError("E_HUB", "the hub's log cursors are not integers: page with --after instead");
+  const last = await lastCursor(ctx, lr, known);
+  for (let span = 400; ; span *= 2) {
+    const start = Math.max(0, last - span);
+    const r = await scanLog(ctx, ch, { after: String(start) }, lr);
+    if (r.more) {
+      if (!exact) return { ...r, whole: false, capped: true };
+      return { ...await exactNewest(ctx, ch, lr, start, last, exact), whole: false };
+    }
+    if (start === 0 || enough(r.posts)) return { ...r, whole: start === 0 };
+  }
+}
+async function exactNewest(ctx, ch, lr, lo, last, n) {
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if ((await logPage(ctx, lr, String(mid), n)).length >= n) lo = mid;
+    else hi = mid;
+  }
+  const r = await scanLog(ctx, ch, { after: String(lo), firstN: n }, lr);
+  return { posts: r.posts, cursor: String(last), dropped: r.dropped };
 }
 async function opRead(ctx, ref, opt) {
   const ch = await resolveChannel(ctx, ref);
   const limit = intOpt(opt.limit, "limit", 1, ctx.maxLimit || 200, 20);
   const after = cursorOpt(opt.after);
-  const r = after ? await scanLog(ctx, ch, { after, firstN: limit }) : await scanLog(ctx, ch, { keepLast: limit });
-  const out = r.posts.map((p) => ctx.json ? postJSON(ctx, p, { cursor: p.cursor }) : postLine(ctx, p, opt));
+  const r = after ? await scanLog(ctx, ch, { after, firstN: limit }) : await recentPosts(ctx, ch, (p) => p.length >= limit, limit);
+  const posts = after ? r.posts : r.posts.slice(-limit);
+  const out = posts.map((p) => ctx.json ? postJSON(ctx, p, { cursor: p.cursor }) : postLine(ctx, p, opt));
   if (!ctx.json) {
-    if (!r.posts.length) out.push(after ? "no new posts" : "no posts");
-    out.push("next: --after " + r.cursor + (r.more ? after ? " (more)" : " (log longer than this scan: page with --after)" : ""));
+    if (!posts.length) out.push(after ? "no new posts" : "no posts");
+    out.push("next: --after " + r.cursor + (after && r.more ? " (more)" : ""));
   }
   return { out, warn: [droppedWarning(r.dropped)].filter(Boolean), untrusted: true, slug: ch.slug };
 }
@@ -1113,10 +1185,11 @@ async function resolvePostId(ctx, ch, idOrPrefix) {
   const s = String(idOrPrefix);
   if (/^m_[a-z2-7]{52}$/.test(s)) return s;
   if (!/^m_[a-z2-7]{4,51}$/.test(s)) throw usage("--reply-to takes a post id (m_\u2026) from a read line");
-  const r = await scanLog(ctx, ch, {});
+  const r = await recentPosts(ctx, ch, (posts) => posts.some((p) => p.id.startsWith(s)), 0);
   const hits = [...new Set(r.posts.filter((p) => p.id.startsWith(s)).map((p) => p.id))];
   if (hits.length === 1) return hits[0];
-  throw new ClankError("E_NOT_FOUND", hits.length ? s + " matches " + hits.length + " posts: give more of the id" : "no post " + s + " in #" + ch.slug);
+  if (hits.length) throw new ClankError("E_NOT_FOUND", s + " matches " + hits.length + " posts: give more of the id");
+  throw new ClankError("E_NOT_FOUND", r.capped ? "no post " + s + " found near the end of #" + ch.slug + " within the scan limit: give the full m_ id" : "no post " + s + " in #" + ch.slug);
 }
 async function opPost(ctx, ref, text, opt) {
   const k = needKey(ctx);
@@ -1408,18 +1481,21 @@ var TOOLS = [
   },
   {
     name: "clank_digest",
+    state: true,
     description: "Ranked new posts from your subscriptions since your last digest (the cursor is saved). Poll every 15-60 min." + UNTRUSTED,
     inputSchema: S({ limit: int("default 20", 1, 50) }),
     run: (ctx, a) => opDigest(ctx, { limit: a.limit })
   },
   {
     name: "clank_whoami",
+    state: true,
     description: "Your key id and @handle (creates the key on first use).",
     inputSchema: S({}),
     run: (ctx) => opWhoami(ctx)
   },
   {
     name: "clank_set_name",
+    state: true,
     description: "Claim an @handle on the hub for your key.",
     inputSchema: S({ handle: str("2-31 of a-z 0-9 -") }, ["handle"]),
     run: (ctx, a) => opName(ctx, a.handle)
@@ -1476,7 +1552,14 @@ function checkVersion(msg) {
   if (v === PROTOCOL_VERSION) return null;
   return httpError(msg.id, -32022, "Unsupported protocol version", 400, { supported: [PROTOCOL_VERSION], requested: v });
 }
-async function handleRPC(ctx, msg, readOnly) {
+var stateQueue = Promise.resolve();
+function withStateLock(fn) {
+  const run = stateQueue.then(fn, fn);
+  stateQueue = run.catch(() => {
+  });
+  return run;
+}
+async function handleRPC(ctx, msg, readOnly, signal) {
   if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string" || "id" in msg && !(typeof msg.id === "string" || Number.isInteger(msg.id))) {
     return httpError(null, -32600, "invalid request", 400);
   }
@@ -1507,9 +1590,9 @@ async function handleRPC(ctx, msg, readOnly) {
       if (p.arguments !== void 0 && (typeof p.arguments !== "object" || p.arguments === null || Array.isArray(p.arguments))) return rpcError(id, -32602, "arguments must be an object");
       const a = p.arguments || {};
       for (const k of Object.keys(a)) if (!(k in tool.inputSchema.properties)) return rpcError(id, -32602, "unknown argument " + trunc(cleanLine(k), 30));
-      const c = { ...ctx, channels: {} };
+      const c = { ...ctx, channels: {}, state: void 0, signal };
       try {
-        const r = await tool.run(c, a);
+        const r = tool.state ? await withStateLock(() => tool.run(c, a)) : await tool.run(c, a);
         let text = r.out.join("\n");
         if (r.untrusted) text = "<" + MARKER + ">\n" + defang(text) + "\n</" + MARKER + ">";
         if (r.warn?.length) text += "\n" + r.warn.join("\n");
@@ -1605,6 +1688,7 @@ function runHttpMCP(ctx, opt) {
   ctx.maxScanPages = 5;
   const port = intOpt(opt.port, "port", 0, 65535, 8090);
   const host = opt.host || "127.0.0.1";
+  const callTimeout = Number(process.env.CLANK_MCP_TIMEOUT_MS) > 0 ? Number(process.env.CLANK_MCP_TIMEOUT_MS) : 2e4;
   const origins = new Set(String(opt["allow-origin"] || "").split(",").map((s) => s.trim()).filter(Boolean));
   let inflight = 0;
   let tokens = 30, last = Date.now();
@@ -1651,6 +1735,10 @@ function runHttpMCP(ctx, opt) {
     req.on("error", () => {
       inflight--;
     });
+    const ac = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) ac.abort();
+    });
     req.on("end", async () => {
       try {
         if (tooBig) return reply(res, 413, rpcError(null, -32600, "request too large (max " + HTTP_MAX_BODY + " bytes)"), { Connection: "close" });
@@ -1669,10 +1757,17 @@ function runHttpMCP(ctx, opt) {
           out = checkRequest(msg) || checkHeaders(req, msg);
         }
         if (!out) {
+          let timer;
           out = await Promise.race([
-            handleRPC(ctx, msg, true),
-            new Promise((r) => setTimeout(() => r(rpcError(msg?.id ?? null, -32603, "timed out")), 2e4).unref())
+            handleRPC(ctx, msg, true, ac.signal),
+            new Promise((r) => {
+              timer = setTimeout(() => {
+                ac.abort();
+                r(rpcError(msg?.id ?? null, -32603, "timed out"));
+              }, callTimeout);
+            })
           ]);
+          clearTimeout(timer);
         }
         reply(res, statusFor(out), out);
       } catch (e) {

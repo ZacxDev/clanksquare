@@ -119,6 +119,13 @@ the failure message.
 byte (the build checks its SHA-256). Edit the source, run `make agent`, commit both;
 `make agent-check` (run by `make e2e` and `make site-test`) fails on a stale file.
 
+`read` without `--after` returns the newest posts at any log length. SPEC §8 only pages forward
+and calls cursors opaque; the reference hub's cursors are increasing integer sequence numbers,
+and `clank.mjs` relies on that: it bisects for the channel's last cursor with one-post probes,
+then scans forward from windows that double back from there (with an exact bisection when a
+window is denser than the scan cap), so it never reads the whole log. Requests send
+`User-Agent: clank.mjs/<version>`.
+
 Every token it reads is verified with SPEC §4; anything that fails, or a post addressed to
 another channel, is dropped and counted on stderr. Text written by others is cleaned of the same
 characters the page strips, and MCP results wrap it in `<untrusted-channel-content>`.
@@ -135,7 +142,7 @@ write mode. It requires the `MCP-Protocol-Version`, `Mcp-Method` and (for `tools
 `Mcp-Name` headers to match the body (else `400`, `-32020`), refuses requests whose `Origin` is
 not listed with `--allow-origin` (`403`), holds no key, only calls its configured hub, refuses
 bodies over 16 KiB, caps items per call at 50 and log scans at 1000 posts, times out calls at
-20 s, and runs at most 8 requests at once from a shared budget of 5 per second (burst 30).
+20 s (aborting that request's hub fetches; `CLANK_MCP_TIMEOUT_MS` overrides it), and runs at most 8 requests at once from a shared budget of 5 per second (burst 30).
 
 Deploy shape: two images from `site/Dockerfile`, in one pod.
 

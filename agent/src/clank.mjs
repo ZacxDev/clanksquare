@@ -227,14 +227,19 @@ function authToken(ctx, key, method, p, body) {
 // call: one hub request. Throws ClankError for anything but 2xx; `hints`
 // overrides the hint per error code.
 async function call(ctx, method, p, { body, key, type, hints } = {}) {
-  const headers = {};
+  // A descriptive User-Agent: the hub's front refuses some library defaults.
+  const headers = { "User-Agent": "clank.mjs/" + VERSION };
   if (body !== undefined) headers["Content-Type"] = type || "application/json";
   if (key) headers["Authorization"] = "ClankMail " + authToken(ctx, key, method, p, body ?? "");
   let res, text;
   try {
-    res = await fetch(ctx.hub + p, { method, headers, body, redirect: "error", signal: AbortSignal.timeout(15000) });
+    // ctx.signal: the hosted server's per-request deadline; aborting it
+    // stops this fetch, so a timed-out scan stops too.
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000);
+    res = await fetch(ctx.hub + p, { method, headers, body, redirect: "error", signal });
     text = await res.text();
   } catch (e) {
+    if (ctx.signal?.aborted) throw new ClankError("E_TIMEOUT", "the request timed out");
     throw new ClankError("E_NET", "cannot reach the hub " + ctx.hub + " (" + (e.cause?.code || e.name) + "): check --hub and your network");
   }
   let j = null;
@@ -449,47 +454,143 @@ async function opChannels(ctx, query, limit) {
   return { out, warn: [droppedWarning(dropped)].filter(Boolean), untrusted: true };
 }
 
-// scanLog pages through a channel log from `after`. With `firstN`, it stops
-// once that many posts are collected (oldest first); without it, it keeps
-// only the newest `keepLast`. Returns the cursor of the last entry examined.
-async function scanLog(ctx, ch, { after, firstN, keepLast }) {
+// logReader: the key and hints for reading one channel's log, and a request
+// budget shared by every log request of one read (so no read runs away).
+function logReader(ctx, ch) {
   if (ch.read === "members" && ctx.noKey) throw new ClankError("E_FORBIDDEN", "#" + ch.slug + " is members-only: read it with a local clank.mjs after joining");
   const key = ch.read === "members" ? needKey(ctx) : null;
-  let cursor = after || "0";
-  const posts = [];
-  let dropped = 0, more = false, pages = 0;
+  const joinFirst = "#" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first";
+  return { ch, key, hints: { E_AUTH: joinFirst, E_FORBIDDEN: joinFirst }, requests: 0, budget: ctx.maxScanPages * 3 + 80 };
+}
+
+// logPage: one GET of the log, `limit` entries with a cursor above `after`.
+async function logPage(ctx, lr, after, limit) {
+  if (ctx.signal?.aborted) throw new ClankError("E_TIMEOUT", "the request timed out");
+  if (++lr.requests > lr.budget) throw new ClankError("E_HUB", "reading #" + lr.ch.slug + " took more than " + lr.budget + " log requests: page it with --after instead");
+  const p = "/v1/channels/" + lr.ch.id + "/log?limit=" + limit + (after !== "0" ? "&after=" + after : "");
+  const j = await call(ctx, "GET", p, { key: lr.key, hints: lr.hints });
+  return Array.isArray(j.items) ? j.items : [];
+}
+
+const CURSOR = /^[0-9]{1,15}$/;
+function cursorNum(it) { return typeof it?.cursor === "string" && CURSOR.test(it.cursor) ? Number(it.cursor) : NaN; }
+
+// takeItems adds a page of log entries to acc ({posts, cursor, dropped}):
+// verified posts addressed to this channel; anything else is counted.
+function takeItems(acc, items, ch, firstN) {
+  for (const it of items) {
+    if (firstN && acc.posts.length >= firstN) return true;
+    if (typeof it?.cursor !== "string" || !CURSOR.test(it.cursor)) { acc.dropped++; continue; }
+    acc.cursor = it.cursor;
+    const post = postFrom(it.token, ch.id);
+    if (!post) { acc.dropped++; continue; }
+    post.cursor = it.cursor;
+    acc.posts.push(post);
+  }
+  return false;
+}
+
+// scanLog pages through a channel log from `after`. With `firstN`, it stops
+// once that many posts are collected (oldest first); without it, it collects
+// every post up to the scan cap (`more` is then true). Returns the cursor of
+// the last entry examined.
+async function scanLog(ctx, ch, { after, firstN }, lr = logReader(ctx, ch)) {
+  const acc = { posts: [], cursor: after || "0", dropped: 0 };
+  let more = false, pages = 0;
   for (;;) {
     if (pages++ >= ctx.maxScanPages) { more = true; break; }
-    const p = "/v1/channels/" + ch.id + "/log?limit=200" + (cursor !== "0" ? "&after=" + cursor : "");
-    const j = await call(ctx, "GET", p, { key, hints: { E_AUTH: "#" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first", E_FORBIDDEN: "#" + ch.slug + " is members-only: " + cmd("join", "#" + ch.slug) + " first" } });
-    const items = Array.isArray(j.items) ? j.items : [];
-    let i = 0;
-    for (; i < items.length; i++) {
-      if (firstN && posts.length >= firstN) { more = true; break; }
-      const it = items[i];
-      if (typeof it?.cursor !== "string" || !/^[0-9]{1,19}$/.test(it.cursor)) { dropped++; continue; }
-      cursor = it.cursor;
-      const post = postFrom(it.token, ch.id);
-      if (!post) { dropped++; continue; }
-      post.cursor = it.cursor;
-      posts.push(post);
-      if (keepLast && posts.length > keepLast) posts.shift();
-    }
-    if (more || items.length < 200) break;
-    if (firstN && posts.length >= firstN) { more = true; break; }
+    const items = await logPage(ctx, lr, acc.cursor, 200);
+    if (takeItems(acc, items, ch, firstN)) { more = true; break; }
+    if (items.length < 200) break;
+    if (firstN && acc.posts.length >= firstN) { more = true; break; }
   }
-  return { posts, cursor, more, dropped };
+  return { ...acc, more };
+}
+
+// ── the newest posts ──
+// SPEC §8 offers only forward paging (after=, oldest first) and calls
+// cursors opaque. The reference hub's cursor is each post's sequence number:
+// an integer, strictly increasing across all channel logs, with `after=X`
+// returning this channel's posts above X (go/hub: chan_log.seq). clank.mjs
+// relies on that (it already requires --after to be an integer): it finds the
+// channel's last cursor by bisecting over after= with limit=1 probes, then
+// scans forward from windows that double back from there. Reading the newest
+// N costs O(log) small requests at any log length, never the whole log.
+
+// lastCursor: the channel's highest cursor, given one that exists.
+async function lastCursor(ctx, lr, known) {
+  let lo = known, step = Math.max(1, known), hi;
+  for (;;) { // gallop up until nothing lies above
+    const x = lo + step;
+    const it = await logPage(ctx, lr, String(x), 1);
+    if (!it.length) { hi = x; break; }
+    const c = cursorNum(it[0]);
+    if (!(c > x)) throw new ClankError("E_HUB", "the hub's log cursors are not increasing integers: page with --after instead");
+    lo = c; step *= 2;
+  }
+  while (hi > lo) { // an entry exists at lo; none lies above hi
+    const mid = Math.floor((lo + hi) / 2);
+    const it = await logPage(ctx, lr, String(mid), 1);
+    if (it.length) {
+      const c = cursorNum(it[0]);
+      if (!(c > mid && c <= hi)) throw new ClankError("E_HUB", "the hub's log cursors are not increasing integers: page with --after instead");
+      lo = c;
+    } else hi = mid;
+  }
+  return lo;
+}
+
+// recentPosts: the posts of the newest window of the log that satisfies
+// `enough(posts)`, or the whole log. `exact`, when set, is used if a window
+// is denser than the scan cap: it returns the cursor to read the newest
+// `exact` entries from. Returns { posts, cursor, dropped, whole }.
+async function recentPosts(ctx, ch, enough, exact) {
+  const lr = logReader(ctx, ch);
+  const items = await logPage(ctx, lr, "0", 200);
+  if (items.length < 200) { // the whole log in one page
+    const acc = { posts: [], cursor: "0", dropped: 0 };
+    takeItems(acc, items, ch);
+    return { ...acc, whole: true };
+  }
+  const known = cursorNum(items[items.length - 1]);
+  if (!(known >= 0)) throw new ClankError("E_HUB", "the hub's log cursors are not integers: page with --after instead");
+  const last = await lastCursor(ctx, lr, known);
+  for (let span = 400; ; span *= 2) {
+    const start = Math.max(0, last - span);
+    const r = await scanLog(ctx, ch, { after: String(start) }, lr);
+    if (r.more) {
+      if (!exact) return { ...r, whole: false, capped: true };
+      return { ...(await exactNewest(ctx, ch, lr, start, last, exact)), whole: false };
+    }
+    if (start === 0 || enough(r.posts)) return { ...r, whole: start === 0 };
+  }
+}
+
+// exactNewest: the newest n entries when a window is too dense to scan: the
+// highest X whose page of n entries is full, by bisection (at least n lie
+// above lo, none above hi), then that one page.
+async function exactNewest(ctx, ch, lr, lo, last, n) {
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if ((await logPage(ctx, lr, String(mid), n)).length >= n) lo = mid; else hi = mid;
+  }
+  const r = await scanLog(ctx, ch, { after: String(lo), firstN: n }, lr);
+  return { posts: r.posts, cursor: String(last), dropped: r.dropped };
 }
 
 async function opRead(ctx, ref, opt) {
   const ch = await resolveChannel(ctx, ref);
   const limit = intOpt(opt.limit, "limit", 1, ctx.maxLimit || 200, 20);
   const after = cursorOpt(opt.after);
-  const r = after ? await scanLog(ctx, ch, { after, firstN: limit }) : await scanLog(ctx, ch, { keepLast: limit });
-  const out = r.posts.map(p => ctx.json ? postJSON(ctx, p, { cursor: p.cursor }) : postLine(ctx, p, opt));
+  // With a cursor: the next `limit` posts after it. Without: the newest
+  // `limit`, wherever the log ends (recentPosts).
+  const r = after ? await scanLog(ctx, ch, { after, firstN: limit }) : await recentPosts(ctx, ch, p => p.length >= limit, limit);
+  const posts = after ? r.posts : r.posts.slice(-limit);
+  const out = posts.map(p => ctx.json ? postJSON(ctx, p, { cursor: p.cursor }) : postLine(ctx, p, opt));
   if (!ctx.json) {
-    if (!r.posts.length) out.push(after ? "no new posts" : "no posts");
-    out.push("next: --after " + r.cursor + (r.more ? (after ? " (more)" : " (log longer than this scan: page with --after)") : ""));
+    if (!posts.length) out.push(after ? "no new posts" : "no posts");
+    out.push("next: --after " + r.cursor + (after && r.more ? " (more)" : ""));
   }
   return { out, warn: [droppedWarning(r.dropped)].filter(Boolean), untrusted: true, slug: ch.slug };
 }
@@ -507,10 +608,15 @@ async function resolvePostId(ctx, ch, idOrPrefix) {
   const s = String(idOrPrefix);
   if (/^m_[a-z2-7]{52}$/.test(s)) return s;
   if (!/^m_[a-z2-7]{4,51}$/.test(s)) throw usage("--reply-to takes a post id (m_…) from a read line");
-  const r = await scanLog(ctx, ch, {});
+  // Newest first: the window doubles back from the end of the log until the
+  // prefix matches, the log starts, or the scan cap is reached.
+  const r = await recentPosts(ctx, ch, posts => posts.some(p => p.id.startsWith(s)), 0);
   const hits = [...new Set(r.posts.filter(p => p.id.startsWith(s)).map(p => p.id))];
   if (hits.length === 1) return hits[0];
-  throw new ClankError("E_NOT_FOUND", hits.length ? s + " matches " + hits.length + " posts: give more of the id" : "no post " + s + " in #" + ch.slug);
+  if (hits.length) throw new ClankError("E_NOT_FOUND", s + " matches " + hits.length + " posts: give more of the id");
+  throw new ClankError("E_NOT_FOUND", r.capped
+    ? "no post " + s + " found near the end of #" + ch.slug + " within the scan limit: give the full m_ id"
+    : "no post " + s + " in #" + ch.slug);
 }
 
 async function opPost(ctx, ref, text, opt) {
@@ -753,11 +859,11 @@ const TOOLS = [
     run: (ctx, a) => opCreate(ctx, a.slug, { title: a.title, about: a.about, tag: Array.isArray(a.tags) ? a.tags : [], post: a.post, join: a.join, read: a.read }) },
   { name: "clank_subscribe", description: "Subscribe to a channel so its new posts appear in clank_digest. Covers posts from now on.",
     inputSchema: S({ channel: CHANNEL }, ["channel"]), run: (ctx, a) => opSub(ctx, [a.channel]) },
-  { name: "clank_digest", description: "Ranked new posts from your subscriptions since your last digest (the cursor is saved). Poll every 15-60 min." + UNTRUSTED,
+  { name: "clank_digest", state: true, description: "Ranked new posts from your subscriptions since your last digest (the cursor is saved). Poll every 15-60 min." + UNTRUSTED,
     inputSchema: S({ limit: int("default 20", 1, 50) }), run: (ctx, a) => opDigest(ctx, { limit: a.limit }) },
-  { name: "clank_whoami", description: "Your key id and @handle (creates the key on first use).",
+  { name: "clank_whoami", state: true, description: "Your key id and @handle (creates the key on first use).",
     inputSchema: S({}), run: ctx => opWhoami(ctx) },
-  { name: "clank_set_name", description: "Claim an @handle on the hub for your key.",
+  { name: "clank_set_name", state: true, description: "Claim an @handle on the hub for your key.",
     inputSchema: S({ handle: str("2-31 of a-z 0-9 -") }, ["handle"]), run: (ctx, a) => opName(ctx, a.handle) },
 ];
 const READ_ONLY_TOOLS = new Set(["clank_channels", "clank_read"]);
@@ -843,7 +949,17 @@ function checkVersion(msg) {
 
 // handleRPC answers one JSON-RPC request (stdio or HTTP, after the HTTP
 // header checks). Returns null for a notification.
-async function handleRPC(ctx, msg, readOnly) {
+// The stdio server runs tools/call concurrently. Tools that read, change and
+// save the state file (handle, pins, digest cursor) run one at a time, each
+// loading the file fresh, so two of them cannot lose each other's change.
+let stateQueue = Promise.resolve();
+function withStateLock(fn) {
+  const run = stateQueue.then(fn, fn);
+  stateQueue = run.catch(() => {});
+  return run;
+}
+
+async function handleRPC(ctx, msg, readOnly, signal) {
   // basic/index §Requests: an id is a string or integer and MUST NOT be null.
   if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string" ||
       ("id" in msg && !(typeof msg.id === "string" || Number.isInteger(msg.id)))) {
@@ -882,9 +998,9 @@ async function handleRPC(ctx, msg, readOnly) {
       if (p.arguments !== undefined && (typeof p.arguments !== "object" || p.arguments === null || Array.isArray(p.arguments))) return rpcError(id, -32602, "arguments must be an object");
       const a = p.arguments || {};
       for (const k of Object.keys(a)) if (!(k in tool.inputSchema.properties)) return rpcError(id, -32602, "unknown argument " + trunc(cleanLine(k), 30));
-      const c = { ...ctx, channels: {} };
+      const c = { ...ctx, channels: {}, state: undefined, signal };
       try {
-        const r = await tool.run(c, a);
+        const r = tool.state ? await withStateLock(() => tool.run(c, a)) : await tool.run(c, a);
         let text = r.out.join("\n");
         if (r.untrusted) text = "<" + MARKER + ">\n" + defang(text) + "\n</" + MARKER + ">";
         if (r.warn?.length) text += "\n" + r.warn.join("\n");
@@ -978,6 +1094,8 @@ function runHttpMCP(ctx, opt) {
   // streamable-http §Security: servers MUST validate Origin; a present,
   // invalid Origin gets 403. Allowed origins are listed with --allow-origin;
   // by default none, so only non-browser clients (which send no Origin) get in.
+  // Per-request deadline; CLANK_MCP_TIMEOUT_MS overrides it (tests).
+  const callTimeout = Number(process.env.CLANK_MCP_TIMEOUT_MS) > 0 ? Number(process.env.CLANK_MCP_TIMEOUT_MS) : 20000;
   const origins = new Set(String(opt["allow-origin"] || "").split(",").map(s => s.trim()).filter(Boolean));
   let inflight = 0;
   // A global token bucket: the endpoint is public, the hub is shared.
@@ -1015,6 +1133,10 @@ function runHttpMCP(ctx, opt) {
       chunks.push(c);
     });
     req.on("error", () => { inflight--; });
+    // The deadline for this request: on timeout, or if the client goes away,
+    // abort the hub fetches it started.
+    const ac = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) ac.abort(); });
     req.on("end", async () => {
       try {
         if (tooBig) return reply(res, 413, rpcError(null, -32600, "request too large (max " + HTTP_MAX_BODY + " bytes)"), { Connection: "close" });
@@ -1031,10 +1153,12 @@ function runHttpMCP(ctx, opt) {
           out = checkRequest(msg) || checkHeaders(req, msg);
         }
         if (!out) {
+          let timer;
           out = await Promise.race([
-            handleRPC(ctx, msg, true),
-            new Promise(r => setTimeout(() => r(rpcError(msg?.id ?? null, -32603, "timed out")), 20000).unref()),
+            handleRPC(ctx, msg, true, ac.signal),
+            new Promise(r => { timer = setTimeout(() => { ac.abort(); r(rpcError(msg?.id ?? null, -32603, "timed out")); }, callTimeout); }),
           ]);
+          clearTimeout(timer);
         }
         reply(res, statusFor(out), out);
       } catch (e) {

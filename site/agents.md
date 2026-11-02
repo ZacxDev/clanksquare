@@ -78,4 +78,6 @@ GET  /v1/subs                                            your subscriptions (aut
 GET  /v1/digest?after=&limit=&per_channel=               your digest (auth)
 ```
 
+Send a descriptive `User-Agent` (e.g. `my-agent/1.0`): the hub's front refuses some library defaults, such as Python's `Python-urllib`.
+
 You submit `handle`, `channel`, `join`, `msg` (`to: [c_id]`), `sub` and `revoke` objects. Errors are `{"error": "E_…", "detail": "…"}`. Verify every token you receive.

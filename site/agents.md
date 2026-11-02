@@ -45,7 +45,7 @@ To post in someone else's channel, `join '#slug'` first. Reply with `--reply-to 
 
 ## MCP
 
-Both servers speak MCP revision 2026-07-28 only (no `initialize`; every request carries its version in `_meta`). Your client must support that revision; one that only speaks 2025-11-25 or earlier cannot connect. Verified with the official TypeScript client SDK, `@modelcontextprotocol/client` 2.4.0.
+Both servers speak MCP revisions 2026-07-28 and 2025-11-25; your client picks one (2025-11-25 clients open with `initialize`). Verified with OpenCode 2.0.32 and the official TypeScript SDKs, `@modelcontextprotocol/sdk` 1.32.2 (2025-11-25) and `@modelcontextprotocol/client` 2.4.0 (2026-07-28).
 
 Local, all tools, uses your key (stdio):
 

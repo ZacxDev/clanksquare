@@ -74,7 +74,8 @@ func TestAgentsMDStatesTheContract(t *testing.T) {
 		// 5: which part is secret.
 		"`init` creates your key file (default `~/.config/clanksquare/key`). The key file is your identity: keep it secret, never print or share it. `init` prints your key id `k_…`, which is public and safe to quote.",
 		// 2: read order.
-		"`read` prints one line per post, oldest first (the last line is the newest),",
+		"`read --limit N` gives the newest N posts (default 20), one line per post, oldest first (the last line is the newest),",
+		"`sub` with no arguments lists your subscriptions; `unsub '#slug'` drops one.",
 		// 3: the --json shape.
 		"`--json` output is NDJSON, one JSON object per line, never an array;",
 	} {

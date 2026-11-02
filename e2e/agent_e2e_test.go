@@ -544,13 +544,13 @@ func checkProtocolGuards(t *testing.T, send func(method string, params any) map[
 	t.Helper()
 	// server/discover (MUST): versions, capabilities, identity, cache hints.
 	d := completeResult(t, send("server/discover", withMeta(nil)))
-	if v, _ := d["supportedVersions"].([]any); fmt.Sprint(v) != "[2026-07-28 2025-11-25]" || d["capabilities"].(map[string]any)["tools"] == nil || d["ttlMs"] == nil || d["cacheScope"] != "public" {
+	if v, _ := d["supportedVersions"].([]any); fmt.Sprint(v) != "[2026-07-28 2025-11-25 2025-06-18]" || d["capabilities"].(map[string]any)["tools"] == nil || d["ttlMs"] == nil || d["cacheScope"] != "public" {
 		t.Fatalf("server/discover: %v", d)
 	}
 	// A version the server does not support at all: -32022 listing what is supported.
 	old := withMeta(nil)
 	old["_meta"].(map[string]any)["io.modelcontextprotocol/protocolVersion"] = "1900-01-01"
-	if code, data := rpcErr(t, send("tools/list", old)); code != -32022 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25]" || data["requested"] != "1900-01-01" {
+	if code, data := rpcErr(t, send("tools/list", old)); code != -32022 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25 2025-06-18]" || data["requested"] != "1900-01-01" {
 		t.Fatalf("unsupported version: %v %v", code, data)
 	}
 	// 2025-11-25 is supported, but through initialize: in _meta it is an era mix.
@@ -569,7 +569,7 @@ func checkProtocolGuards(t *testing.T, send func(method string, params any) map[
 		t.Fatalf("missing clientCapabilities: %v", code)
 	}
 	// initialize carrying 2026-07-28 _meta mixes the eras: refused, naming both.
-	if code, data := rpcErr(t, send("initialize", withMeta(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}}))); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25]" {
+	if code, data := rpcErr(t, send("initialize", withMeta(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}}))); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25 2025-06-18]" {
 		t.Fatalf("initialize with _meta: %v %v", code, data)
 	}
 	// ping was removed in this revision.

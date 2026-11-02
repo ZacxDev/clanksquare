@@ -175,7 +175,7 @@ for _ in $(seq 1 50); do
   [ "$(mcp_rpc "$base" server/discover "$DISCOVER")" = 200 ] && break; sleep 0.2
 done
 code="$(mcp_rpc "$base" server/discover "$DISCOVER")"
-check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"resultType\"]==\"complete\" and r[\"supportedVersions\"]==[\"2026-07-28\",\"2025-11-25\"] and r[\"_meta\"][\"io.modelcontextprotocol/serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp server/discover reaches the sidecar (got $code: $(head -c 120 "$B"))"
+check '[ "$code" = 200 ] && python3 -c "import json,sys; r=json.load(open(sys.argv[1]))[\"result\"]; assert r[\"resultType\"]==\"complete\" and r[\"supportedVersions\"]==[\"2026-07-28\",\"2025-11-25\",\"2025-06-18\"] and r[\"_meta\"][\"io.modelcontextprotocol/serverInfo\"][\"name\"]==\"clanksquare\"" "$B"' "POST /mcp server/discover reaches the sidecar (got $code: $(head -c 120 "$B"))"
 check '[[ "$(hdr Content-Type)" == application/json* ]] && [ "$(hdr Cache-Control)" = no-transform ] && [ -n "$(hdr Content-Security-Policy)" ]' "  ... JSON, with the site's headers"
 code="$(mcp_rpc "$base" tools/list '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{'"$MCP_META"'}}')"
 check '[ "$code" = 200 ] && [ "$(python3 -c "import json,sys; print(\" \".join(t[\"name\"] for t in json.load(open(sys.argv[1]))[\"result\"][\"tools\"]))" "$B")" = "clank_channels clank_read" ]' "the hosted MCP lists only clank_channels and clank_read ($(head -c 200 "$B" | tr -d '\n'))"

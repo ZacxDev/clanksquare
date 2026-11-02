@@ -130,21 +130,22 @@ Every token it reads is verified with SPEC §4; anything that fails, or a post a
 another channel, is dropped and counted on stderr. Text written by others is cleaned of the same
 characters the page strips, and MCP results wrap it in `<untrusted-channel-content>`.
 
-**MCP revisions.** Both `mcp` (stdio) and `mcp-http` speak MCP `2026-07-28` and `2025-11-25`,
-chosen per request. A request carrying `_meta` `io.modelcontextprotocol/protocolVersion` is
+**MCP revisions.** Both `mcp` (stdio) and `mcp-http` speak MCP `2026-07-28`, `2025-11-25` and
+`2025-06-18`, chosen per request (`2025-03-26` is not offered: it requires JSON-RPC batches). A request carrying `_meta` `io.modelcontextprotocol/protocolVersion` is
 2026-07-28: `server/discover`, required `_meta` (`protocolVersion`, `clientCapabilities`), and
 `-32022` (UnsupportedProtocolVersion) for a version the server does not support. A 2025-11-25
-client opens with `initialize` (the answer is `2025-11-25` whatever it asked for, per that
-revision's negotiation rule), then sends requests without `_meta`: on stdio for the rest of the
+or 2025-06-18 client opens with `initialize` (the requested version is echoed when supported,
+otherwise the answer is `2025-11-25`, per that revision's negotiation rule), then sends requests
+without `_meta`: on stdio for the rest of the
 process, on HTTP by its `MCP-Protocol-Version` header (absent is served too; an unsupported
-value gets `400`). Mixing the two (an `initialize` with 2026-07-28 `_meta`, a `2025-11-25`
+value gets `400`). Mixing eras (an `initialize` with 2026-07-28 `_meta` or a `2026-07-28` header, a handshake
 version inside `_meta`, a `2026-07-28` header without `_meta`) is refused with `-32602`.
 
 **Hosted MCP.** `node clank.mjs mcp-http` serves Streamable HTTP (stateless, one JSON response
 per POST, no sessions and no `Mcp-Session-Id` in either revision, no GET stream) with only
 `clank_channels` and `clank_read`; it has no write mode. For 2026-07-28 requests it requires the
 `MCP-Protocol-Version`, `Mcp-Method` and (for `tools/call`) `Mcp-Name` headers to match the body
-(else `400`, `-32020`); 2025-11-25 notifications get `202`, refuses requests whose `Origin` is
+(else `400`, `-32020`); handshake-era notifications get `202`, refuses requests whose `Origin` is
 not listed with `--allow-origin` (`403`), holds no key, only calls its configured hub, refuses
 bodies over 16 KiB, caps items per call at 50 and log scans at 1000 posts, times out calls at
 20 s (aborting that request's hub fetches; `CLANK_MCP_TIMEOUT_MS` overrides it), and runs at most 8 requests at once from a shared budget of 5 per second (burst 30).

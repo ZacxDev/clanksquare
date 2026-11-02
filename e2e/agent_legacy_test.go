@@ -50,7 +50,7 @@ func TestClankMCPStdioLegacy(t *testing.T) {
 
 	// Before initialize, a request without _meta is neither era: refused,
 	// pointing at both ways in.
-	if code, data := rpcErr(t, p.callRaw("tools/list", map[string]any{})); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25]" {
+	if code, data := rpcErr(t, p.callRaw("tools/list", map[string]any{})); code != -32602 || fmt.Sprint(data["supported"]) != "[2026-07-28 2025-11-25 2025-06-18]" {
 		t.Fatalf("tools/list before initialize: %v %v", code, data)
 	}
 	// A ping is allowed before initialize (2025-11-25 lifecycle).
@@ -59,6 +59,8 @@ func TestClankMCPStdioLegacy(t *testing.T) {
 	}
 	// Version negotiation: a version the server lacks gets its own.
 	checkLegacyInit(t, p.callRaw("initialize", legacyInit("2024-01-01")), legacyVersion)
+	// A supported older handshake version is echoed (2025-11-25 lifecycle).
+	checkLegacyInit(t, p.callRaw("initialize", legacyInit("2025-06-18")), "2025-06-18")
 	checkLegacyInit(t, p.callRaw("initialize", legacyInit(legacyVersion)), legacyVersion)
 	p.in.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"))
 
@@ -121,6 +123,23 @@ func TestClankMCPHTTPLegacy(t *testing.T) {
 	checkLegacyInit(t, m, legacyVersion)
 	resp, m = postLegacy(t, url, rpcBody(2, "initialize", legacyInit("2024-01-01")), "")
 	checkLegacyInit(t, m, legacyVersion)
+	resp, m = postLegacy(t, url, rpcBody(2, "initialize", legacyInit("2025-06-18")), "")
+	checkLegacyInit(t, m, "2025-06-18")
+	// The negotiated 2025-06-18 header is accepted.
+	if resp, m := postLegacy(t, url, rpcBody(2, "tools/list", map[string]any{}), "2025-06-18"); resp.StatusCode != 200 || m["result"] == nil {
+		t.Fatalf("tools/list with MCP-Protocol-Version 2025-06-18: HTTP %d %v", resp.StatusCode, m)
+	}
+	// Era mix: initialize under a 2026-07-28 header (no _meta).
+	if resp, m := postLegacy(t, url, rpcBody(2, "initialize", legacyInit(legacyVersion)), mcpVersion); resp.StatusCode != 400 || m["error"] == nil || m["error"].(map[string]any)["code"] != float64(-32602) {
+		t.Fatalf("initialize with a 2026-07-28 header: HTTP %d %v", resp.StatusCode, m)
+	}
+	// Era mix: a handshake version inside _meta, from a client that sends no
+	// Mcp-Method: -32602, not a header error.
+	mixed := withMeta(nil)
+	mixed["_meta"].(map[string]any)["io.modelcontextprotocol/protocolVersion"] = legacyVersion
+	if resp, m := postLegacy(t, url, rpcBody(2, "tools/list", mixed), legacyVersion); resp.StatusCode != 400 || m["error"] == nil || m["error"].(map[string]any)["code"] != float64(-32602) {
+		t.Fatalf("2025-11-25 in _meta without Mcp-Method: HTTP %d %v", resp.StatusCode, m)
+	}
 
 	// notifications/initialized: 202, no body.
 	if resp, _ := postLegacy(t, url, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`), legacyVersion); resp.StatusCode != 202 {

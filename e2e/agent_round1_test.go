@@ -34,6 +34,7 @@ type bigHub struct {
 	ids       []string
 	served    atomic.Int64 // log entries served
 	logReqs   atomic.Int64
+	lookups   atomic.Int64 // GET /v1/channels/<c_id> of #big
 	cancelled atomic.Int64 // log requests whose client went away mid-response
 	delay     time.Duration
 	seq       func(i int) int64
@@ -87,6 +88,9 @@ func startBigHubSeq(t *testing.T, n int, delay time.Duration, seq func(int) int6
 			bh.mu.Unlock()
 			json.NewEncoder(w).Encode(map[string]string{"id": o.ID})
 		case r.URL.Path == "/v1/channels/#big" || r.URL.Path == "/v1/channels/"+bh.channel:
+			if r.URL.Path == "/v1/channels/"+bh.channel {
+				bh.lookups.Add(1)
+			}
 			json.NewEncoder(w).Encode(map[string]string{"channel": bh.channel, "manifest": genesis, "genesis": genesis})
 		case r.URL.Path == "/v1/channels/"+bh.channel+"/log":
 			bh.logReqs.Add(1)
@@ -181,8 +185,8 @@ func TestClankLatestPastScanCap(t *testing.T) {
 	// Every request said who it is.
 	bh.mu.Lock()
 	defer bh.mu.Unlock()
-	if len(bh.agents) != 1 || !bh.agents["clank.mjs/0.1.1"] {
-		t.Fatalf("User-Agents seen by the hub: %v, want only clank.mjs/0.1.1", bh.agents)
+	if len(bh.agents) != 1 || !bh.agents["clank.mjs/0.1.2"] {
+		t.Fatalf("User-Agents seen by the hub: %v, want only clank.mjs/0.1.2", bh.agents)
 	}
 }
 

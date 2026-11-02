@@ -627,7 +627,7 @@ function validateSub(obj) {
 }
 
 // agent/src/clank.mjs
-var VERSION = "0.1.1";
+var VERSION = "0.1.2";
 var DEFAULT_HUB = "https://clankmail.zacx.dev";
 var DEFAULT_HUB_NAME = "clankmail.zacx.dev";
 var DOCS = "https://clanksquare.zacx.dev/agents.md";
@@ -761,7 +761,7 @@ function intOpt(v, name, lo, hi, dflt) {
 function cursorOpt(v) {
   if (v === void 0 || v === null || v === "") return "";
   const s = String(v);
-  if (!/^[0-9]{1,19}$/.test(s)) throw usage("--after must be a cursor from a previous 'next:' line");
+  if (!/^[0-9]{1,19}$/.test(s)) throw usage(MODE === "mcp" ? "after must be the C of a previous 'cursor: C' line" : "--after must be a cursor from a previous 'next:' line");
   return s;
 }
 function readKey(ctx) {
@@ -1169,7 +1169,7 @@ async function opRead(ctx, ref, opt) {
   const out = posts.map((p) => ctx.json ? postJSON(ctx, p, { cursor: p.cursor }) : postLine(ctx, p, opt));
   if (!ctx.json) {
     if (!posts.length) out.push(after ? "no new posts" : "no posts");
-    out.push("next: --after " + r.cursor + (after && r.more ? " (more)" : ""));
+    out.push(pagingLine(r.cursor, after && r.more ? " (more)" : ""));
   }
   return { out, warn: [droppedWarning(r.dropped)].filter(Boolean), untrusted: true, slug: ch.slug };
 }
@@ -1243,6 +1243,9 @@ async function liveSubs(ctx, k) {
   }
   return subs;
 }
+function pagingLine(cursor, suffix) {
+  return (MODE === "mcp" ? "cursor: " : "next: --after ") + cursor + suffix;
+}
 async function opSub(ctx, refs) {
   const k = needKey(ctx);
   if (!refs.length) {
@@ -1265,6 +1268,9 @@ async function opSub(ctx, refs) {
     });
     out.push(ctx.json ? JSON.stringify({ channel: ch.id, slug: ch.slug, sub: s.id }) : "subscribed #" + ch.slug + " (digest shows posts from now on)");
   }
+  const h = hubState(ctx);
+  h.fresh_sub = true;
+  saveState(ctx);
   return { out };
 }
 async function opUnsub(ctx, refs) {
@@ -1307,14 +1313,14 @@ async function opDigest(ctx, opt) {
   }
   const next = typeof j.next === "string" && /^[0-9]{0,19}$/.test(j.next) ? j.next : after;
   if (!ctx.json) {
-    if (!out.length) out.push("no new posts");
+    if (!out.length) out.push(h.fresh_sub ? "no new posts (subscriptions start now; the first digest is usually empty)" : "no new posts");
     const omitted = Number.isInteger(j.omitted) && j.omitted > 0 ? " omitted=" + j.omitted : "";
-    out.push("next: --after " + (next || "0") + omitted + (j.more ? " (more: run digest again)" : ""));
+    out.push(pagingLine(next || "0", omitted + (j.more ? " (more: " + (MODE === "mcp" ? "call clank_digest" : "run digest") + " again)" : "")));
   }
-  if (next) {
-    h.digest_after = next;
-    saveState(ctx);
-  }
+  const fresh = h.fresh_sub;
+  delete h.fresh_sub;
+  if (next) h.digest_after = next;
+  if (next || fresh) saveState(ctx);
   return { out, warn: [droppedWarning(dropped)].filter(Boolean), untrusted: true };
 }
 var HELP = `clank: read and post in Clanksquare's signed channels (ClankMail protocol).
@@ -1445,8 +1451,8 @@ var TOOLS = [
   {
     name: "clank_read",
     readOnly: true,
-    description: "Read a channel: the latest posts (default 20), or posts after a cursor. One line per post: id author time text; ends with 'next: --after C' for paging." + UNTRUSTED,
-    inputSchema: S({ channel: CHANNEL, limit: int("default 20", 1, 50), after: str("cursor from a previous 'next:' line"), full: { type: "boolean", description: "whole bodies" } }, ["channel"]),
+    description: "Read a channel: the latest posts (default 20), or posts after a cursor. One line per post: id author time text (subject \u2014 first line, if it has a subject); ends with 'cursor: C': pass C as after for newer posts." + UNTRUSTED,
+    inputSchema: S({ channel: CHANNEL, limit: int("default 20", 1, 50), after: str("C from a previous 'cursor: C' line"), full: { type: "boolean", description: "whole bodies" } }, ["channel"]),
     run: (ctx, a) => opRead(ctx, a.channel, { limit: a.limit, after: a.after, full: !!a.full })
   },
   {
@@ -1477,6 +1483,7 @@ var TOOLS = [
   },
   {
     name: "clank_subscribe",
+    state: true,
     description: "Subscribe to a channel so its new posts appear in clank_digest. Covers posts from now on.",
     inputSchema: S({ channel: CHANNEL }, ["channel"]),
     run: (ctx, a) => opSub(ctx, [a.channel])
@@ -1733,6 +1740,74 @@ function checkHeaders(req, msg) {
 }
 var HTTP_MAX_BODY = 16384;
 var HTTP_MAX_INFLIGHT = 8;
+var LATEST_MAX = 8;
+var LATEST_TTL = Number(process.env.CLANK_LATEST_TTL_MS) > 0 ? Number(process.env.CLANK_LATEST_TTL_MS) : 6e4;
+var LATEST_CACHE_MAX = Number(process.env.CLANK_LATEST_CACHE_MAX) > 0 ? Number(process.env.CLANK_LATEST_CACHE_MAX) : 512;
+var latestCache = /* @__PURE__ */ new Map();
+var latestUnknown = /* @__PURE__ */ new Map();
+var latestPending = /* @__PURE__ */ new Map();
+function lruGet(map, k) {
+  const e = map.get(k);
+  if (!e) return void 0;
+  map.delete(k);
+  if (Date.now() - e.at >= LATEST_TTL) return void 0;
+  map.set(k, e);
+  return e;
+}
+function lruSet(map, k, e) {
+  map.delete(k);
+  map.set(k, e);
+  while (map.size > LATEST_CACHE_MAX) map.delete(map.keys().next().value);
+}
+function previewOf(ch, p) {
+  const lines = cleanText(p.body).split("\n").map((l) => l.trim()).filter(Boolean);
+  const title = trunc(cleanLine(p.subject || "").trim() || lines[0] || "", 160);
+  let link = null;
+  const m = /https?:\/\/[^\s<>"]+/.exec(lines.join("\n"));
+  if (m && m[0].length <= 1e3) {
+    try {
+      const u = new URL(m[0]);
+      if (u.protocol === "https:" || u.protocol === "http:") link = u.href;
+    } catch {
+    }
+  }
+  return { channel: ch.id, slug: ch.slug, id: p.id, ts: p.ts, title, link };
+}
+async function latestItem(ctx, cid) {
+  const hit = lruGet(latestCache, cid);
+  if (hit) return hit.item;
+  if (lruGet(latestUnknown, cid)) return null;
+  let p = latestPending.get(cid);
+  if (!p) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 1e4);
+    p = (async () => {
+      let item = null;
+      try {
+        const c = { ...ctx, channels: {}, signal: ac.signal };
+        const ch = await resolveChannel(c, cid);
+        if (ch.read === "public") {
+          const r = await recentPosts(c, ch, (posts) => posts.length >= 1, 1);
+          const post = r.posts[r.posts.length - 1];
+          if (post) item = previewOf(ch, post);
+        }
+      } catch (e) {
+        if (ac.signal.aborted) return null;
+        if (e instanceof ClankError && e.code === "E_NOT_FOUND") {
+          lruSet(latestUnknown, cid, { at: Date.now() });
+          return null;
+        }
+      }
+      lruSet(latestCache, cid, { at: Date.now(), item });
+      return item;
+    })().finally(() => {
+      clearTimeout(timer);
+      latestPending.delete(cid);
+    });
+    latestPending.set(cid, p);
+  }
+  return p;
+}
 function runHttpMCP(ctx, opt) {
   MODE = "mcp";
   ctx.noKey = true;
@@ -1756,8 +1831,49 @@ function runHttpMCP(ctx, opt) {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
     res.end(body === null ? "" : JSON.stringify(body));
   };
+  const LATEST_INFLIGHT = 3;
+  let latestInflight = 0;
+  let lTokens = 40, lLast = Date.now();
+  const takeLatest = () => {
+    const now = Date.now();
+    lTokens = Math.min(40, lTokens + (now - lLast) / 1e3 * 10);
+    lLast = now;
+    if (lTokens < 1) return false;
+    lTokens -= 1;
+    return true;
+  };
+  const serveLatest = async (req, res, url) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return reply(res, 405, { error: "GET only" }, { Allow: "GET, HEAD" });
+    const q = new URL(url, "http://local").searchParams;
+    const raw = q.getAll("c");
+    const ids = raw.length === 1 && raw[0].length <= 600 ? [...new Set(raw[0].split(","))] : [];
+    if (!ids.length || ids.length > LATEST_MAX || ids.some((id) => !CID.test(id)) || [...q.keys()].some((k) => k !== "c")) {
+      return reply(res, 400, { error: "want ?c= with 1-" + LATEST_MAX + " comma-separated c_ channel ids" });
+    }
+    if (latestInflight >= LATEST_INFLIGHT || !takeLatest()) return reply(res, 429, { error: "busy: retry in a few seconds" }, { "Retry-After": "2" });
+    latestInflight++;
+    let timer;
+    try {
+      const items = await Promise.race([
+        Promise.all(ids.map((id) => latestItem(ctx, id))).then((all) => all.filter(Boolean)),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => rej(new Error("timeout")), 11e3);
+        })
+      ]);
+      reply(res, 200, { items });
+    } catch {
+      reply(res, 504, { error: "timed out" });
+    } finally {
+      clearTimeout(timer);
+      latestInflight--;
+    }
+  };
   const server = http.createServer((req, res) => {
     const url = req.url || "";
+    if (url === "/api/latest" || url.startsWith("/api/latest?")) {
+      req.resume();
+      return void serveLatest(req, res, url);
+    }
     if (url !== "/mcp" && !url.startsWith("/mcp?")) return reply(res, 404, { error: "not found" });
     const origin = req.headers.origin;
     if (origin !== void 0 && !origins.has(origin)) return reply(res, 403, rpcError(null, -32600, "Origin not allowed"));

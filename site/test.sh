@@ -86,7 +86,7 @@ script_hash="$(sed -n 's/^script //p' <<<"$hashes")"
 style_hash="$(sed -n 's/^style //p' <<<"$hashes")"
 check '[[ "$csp" == *"script-src $script_hash;"* ]]' "CSP script-src is the hash of the inline <script> ($script_hash)"
 check '[[ "$csp" == *"style-src $style_hash;"* ]]' "CSP style-src is the hash of the inline <style> ($style_hash)"
-check '[[ "$csp" == *"connect-src $PROD_HUB;"* ]]' "the production CSP connect-src is $PROD_HUB and only it"
+check '[[ "$csp" == *"connect-src '"'self'"' $PROD_HUB;"* ]]' "the production CSP connect-src is the site itself and $PROD_HUB, nothing else"
 meta="$(grep -o '<meta name="clanksquare-hub" content="[^"]*">' "$B" | sed 's/.*content="\([^"]*\)".*/\1/')"
 check '[ "$meta" = "$PROD_HUB" ]' "the production page fetches from $PROD_HUB (got '$meta')"
 check '! grep -q "__HUB_URL__" "$B"' "no placeholder left in the served page"
@@ -118,7 +118,7 @@ check '[ "$code" = 405 ]' "POST / is 405 (got $code)"
 code="$(get "$base/healthz")"
 check '[ "$code" = 200 ] && [ "$(cat "$B")" = ok ]' "GET /healthz is 200 ok"
 check '! grep -nE "innerHTML|outerHTML|insertAdjacentHTML|document\.write|\.html\(|eval\(|new Function" "$here/index.html"' "index.html has no innerHTML/outerHTML/insertAdjacentHTML/document.write/eval"
-check 'grep -q "__HUB_URL__" "$here/index.html" && grep -q "connect-src __HUB_URL__;" "$here/nginx.conf" && ! grep -q "$PROD_HUB" "$here/index.html" "$here/nginx.conf"' \
+check 'grep -q "__HUB_URL__" "$here/index.html" && grep -q "connect-src '"'self'"' __HUB_URL__;" "$here/nginx.conf" && ! grep -q "$PROD_HUB" "$here/index.html" "$here/nginx.conf"' \
   "the hub URL is set only in site/Dockerfile (index.html and nginx.conf carry the placeholder)"
 
 # Build arguments that are not what they claim are refused at build time, and
@@ -166,6 +166,8 @@ DISCOVER='{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{'"$MCP_ME
 # Negative control: before the sidecar runs, /mcp is nginx's 502.
 code="$(mcp_rpc "$base" server/discover "$DISCOVER")"
 check '[ "$code" = 502 ]' "POST /mcp with no sidecar running is 502 (got $code)"
+code="$(get "$base/api/latest?c=bad")"
+check '[ "$code" = 502 ]' "GET /api/latest with no sidecar running is 502 (got $code)"
 docker build -q -f "$root/site/Dockerfile" --target mcp -t "$mcp_image" "$root" >/dev/null
 mcp_name="$id-mcp"
 containers+=("$mcp_name")
@@ -184,6 +186,17 @@ check '[ "$code" = 200 ] && grep -q "\"code\":-32602" "$B"' "the hosted MCP refu
 # The Mcp-Method header reaches the sidecar through nginx: a mismatch is its 400 HeaderMismatch.
 code="$(mcp_rpc "$base" tools/list "$DISCOVER")"
 check '[ "$code" = 400 ] && grep -q "\"code\":-32020" "$B"' "an Mcp-Method that does not match the body is 400 HeaderMismatch through nginx (got $code)"
+# /api/latest (the landing page's previews) through nginx to the sidecar.
+code="$(get "$base/api/latest?c=bad")"
+check '[ "$code" = 400 ] && grep -q "c_ channel ids" "$B"' "GET /api/latest with a bad id reaches the sidecar and is refused 400 (got $code: $(head -c 80 "$B"))"
+check '[[ "$(hdr Content-Type)" == application/json* ]] && [ "$(hdr Cache-Control)" = no-transform ] && [ -n "$(hdr Content-Security-Policy)" ]' "  ... JSON, with the site's headers"
+code="$(get -X POST --data x "$base/api/latest?c=bad")"
+check '[ "$code" = 405 ]' "POST /api/latest is 405 at nginx (got $code)"
+if [ "${CHECK_LIVE:-0}" = 1 ]; then
+  live_cid="$(curl -fsS -A clanksquare-site-test "$PROD_HUB/v1/channels/%23llm-papers" | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
+  code="$(get "$base/api/latest?c=$live_cid")"
+  check '[ "$code" = 200 ] && python3 -c "import json,sys; it=json.load(open(sys.argv[1]))[\"items\"][0]; assert it[\"title\"] and it[\"slug\"]==\"llm-papers\"" "$B" && [ "$(hdr Cache-Control)" = no-transform ]' "live: /api/latest returns the newest #llm-papers post, Cache-Control no-transform only (got $code: $(head -c 120 "$B"))"
+fi
 # MCP 2025-11-25 through nginx: initialize with no MCP headers, then a
 # notification (202) and tools/list with the negotiated header.
 code="$(get -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}' "$base/mcp")"
@@ -226,7 +239,13 @@ items = [
     ch("c_plain", 5, 11, OTHER, "plain", "Plain", "A plain channel.", []),
     ch("c_bidi", 4, 6, OTHER, "bi\u200bdi", "invoice\u202efdp.exe\u200b\u200d!", "a" + INVISIBLE + "b", []),
     ch("c_lookalike", 2, 5, OTHER, "agent-tooling", "Agent tooling releases", "Looks like the launch channel.", []),
-    ch("c_launch", 1, 2, LAUNCH, "agent-tooling", "Agent tooling releases", "Releases of agent tooling.", ["agents"]),
+    ch("c_" + "l" * 52, 1, 2, LAUNCH, "agent-tooling", "Agent tooling releases", "Releases of agent tooling.", ["agents"]),
+    # A quiet launch channel: still shown (launch channels are not filtered).
+    ch("c_" + "m" * 52, 1, 0, LAUNCH, "llm-papers", "LLM papers", "Papers.", []),
+    # Community channels the page leaves out, one per rule.
+    ch("c_sandbox", 9, 9, OTHER, "sandbox", "Sandbox", "Test posting here.", []),
+    ch("c_tagged", 4, 4, OTHER, "tagged-test", "Tagged test", "", ["test"]),
+    ch("c_quiet", 3, 0, OTHER, "quiet", "Quiet", "No posts this week.", []),
 ]
 open(work + "/list.json", "w").write(json.dumps({"items": items, "next": ""}))
 EOF
@@ -278,7 +297,7 @@ docker build -q -f "$root/site/Dockerfile" --build-arg "HUB_URL=$nocors_hub" -t 
 run_site cors "$cors_image"; cors_base="$site_url"
 run_site nocors "$nocors_image"; nocors_base="$site_url"
 get "$cors_base/" >/dev/null
-check '[[ "$(hdr Content-Security-Policy)" == *"connect-src $cors_hub;"* ]]' "a stub build's CSP connect-src follows HUB_URL ($cors_hub)"
+check '[[ "$(hdr Content-Security-Policy)" == *"connect-src '"'self'"' $cors_hub;"* ]]' "a stub build's CSP connect-src follows HUB_URL ($cors_hub)"
 
 # ── headless browser ────────────────────────────────────────────────
 browser() {

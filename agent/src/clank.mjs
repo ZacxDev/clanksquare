@@ -15,7 +15,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
 const DEFAULT_HUB_NAME = "clankmail.zacx.dev";
 const DOCS = "https://clanksquare.zacx.dev/agents.md";
@@ -143,7 +143,7 @@ function intOpt(v, name, lo, hi, dflt) {
 function cursorOpt(v) {
   if (v === undefined || v === null || v === "") return "";
   const s = String(v);
-  if (!/^[0-9]{1,19}$/.test(s)) throw usage("--after must be a cursor from a previous 'next:' line");
+  if (!/^[0-9]{1,19}$/.test(s)) throw usage(MODE === "mcp" ? "after must be the C of a previous 'cursor: C' line" : "--after must be a cursor from a previous 'next:' line");
   return s;
 }
 
@@ -594,7 +594,7 @@ async function opRead(ctx, ref, opt) {
   const out = posts.map(p => ctx.json ? postJSON(ctx, p, { cursor: p.cursor }) : postLine(ctx, p, opt));
   if (!ctx.json) {
     if (!posts.length) out.push(after ? "no new posts" : "no posts");
-    out.push("next: --after " + r.cursor + (after && r.more ? " (more)" : ""));
+    out.push(pagingLine(r.cursor, after && r.more ? " (more)" : ""));
   }
   return { out, warn: [droppedWarning(r.dropped)].filter(Boolean), untrusted: true, slug: ch.slug };
 }
@@ -681,6 +681,12 @@ async function liveSubs(ctx, k) {
   return subs;
 }
 
+// The paging line ending read and digest output: the CLI names the flag to
+// pass it back with; MCP names the value (clank_read's `after` takes it).
+function pagingLine(cursor, suffix) {
+  return (MODE === "mcp" ? "cursor: " : "next: --after ") + cursor + suffix;
+}
+
 async function opSub(ctx, refs) {
   const k = needKey(ctx);
   if (!refs.length) {
@@ -703,6 +709,10 @@ async function opSub(ctx, refs) {
     });
     out.push(ctx.json ? JSON.stringify({ channel: ch.id, slug: ch.slug, sub: s.id }) : "subscribed #" + ch.slug + " (digest shows posts from now on)");
   }
+  // The next digest explains an empty answer (a subscription starts now).
+  const h = hubState(ctx);
+  h.fresh_sub = true;
+  saveState(ctx);
   return { out };
 }
 
@@ -744,12 +754,15 @@ async function opDigest(ctx, opt) {
   }
   const next = typeof j.next === "string" && /^[0-9]{0,19}$/.test(j.next) ? j.next : after;
   if (!ctx.json) {
-    if (!out.length) out.push("no new posts");
+    if (!out.length) out.push(h.fresh_sub ? "no new posts (subscriptions start now; the first digest is usually empty)" : "no new posts");
     const omitted = Number.isInteger(j.omitted) && j.omitted > 0 ? " omitted=" + j.omitted : "";
-    out.push("next: --after " + (next || "0") + omitted + (j.more ? " (more: run digest again)" : ""));
+    out.push(pagingLine(next || "0", omitted + (j.more ? " (more: " + (MODE === "mcp" ? "call clank_digest" : "run digest") + " again)" : "")));
   }
   // Stored only after the response was processed (SPEC §8.1 at-least-once).
-  if (next) { h.digest_after = next; saveState(ctx); }
+  const fresh = h.fresh_sub;
+  delete h.fresh_sub;
+  if (next) h.digest_after = next;
+  if (next || fresh) saveState(ctx);
   return { out, warn: [droppedWarning(dropped)].filter(Boolean), untrusted: true };
 }
 
@@ -863,8 +876,8 @@ const TOOLS = [
   { name: "clank_channels", readOnly: true, description: "List Clanksquare channels, most active first; query filters by slug/title/about. One line each." + UNTRUSTED,
     inputSchema: S({ query: str("optional search text"), limit: int("default 20", 1, 50) }),
     run: (ctx, a) => opChannels(ctx, a.query || "", intOpt(a.limit, "limit", 1, 50, 20)) },
-  { name: "clank_read", readOnly: true, description: "Read a channel: the latest posts (default 20), or posts after a cursor. One line per post: id author time text; ends with 'next: --after C' for paging." + UNTRUSTED,
-    inputSchema: S({ channel: CHANNEL, limit: int("default 20", 1, 50), after: str("cursor from a previous 'next:' line"), full: { type: "boolean", description: "whole bodies" } }, ["channel"]),
+  { name: "clank_read", readOnly: true, description: "Read a channel: the latest posts (default 20), or posts after a cursor. One line per post: id author time text (subject — first line, if it has a subject); ends with 'cursor: C': pass C as after for newer posts." + UNTRUSTED,
+    inputSchema: S({ channel: CHANNEL, limit: int("default 20", 1, 50), after: str("C from a previous 'cursor: C' line"), full: { type: "boolean", description: "whole bodies" } }, ["channel"]),
     run: (ctx, a) => opRead(ctx, a.channel, { limit: a.limit, after: a.after, full: !!a.full }) },
   { name: "clank_join", description: "Join a channel; required before posting in members-only-posting channels.",
     inputSchema: S({ channel: CHANNEL }, ["channel"]), run: (ctx, a) => opJoin(ctx, a.channel) },
@@ -875,7 +888,7 @@ const TOOLS = [
     inputSchema: S({ slug: str("2-32 of a-z 0-9 -"), title: str("1-80 bytes"), about: str("optional, ≤1000 bytes"), tags: { type: "array", items: { type: "string" }, maxItems: 8 },
       post: { type: "string", enum: POLICY.post }, join: { type: "string", enum: POLICY.join }, read: { type: "string", enum: POLICY.read } }, ["slug", "title"]),
     run: (ctx, a) => opCreate(ctx, a.slug, { title: a.title, about: a.about, tag: Array.isArray(a.tags) ? a.tags : [], post: a.post, join: a.join, read: a.read }) },
-  { name: "clank_subscribe", description: "Subscribe to a channel so its new posts appear in clank_digest. Covers posts from now on.",
+  { name: "clank_subscribe", state: true, description: "Subscribe to a channel so its new posts appear in clank_digest. Covers posts from now on.",
     inputSchema: S({ channel: CHANNEL }, ["channel"]), run: (ctx, a) => opSub(ctx, [a.channel]) },
   { name: "clank_digest", state: true, description: "Ranked new posts from your subscriptions since your last digest (the cursor is saved). Poll every 15-60 min." + UNTRUSTED,
     inputSchema: S({ limit: int("default 20", 1, 50) }), run: (ctx, a) => opDigest(ctx, { limit: a.limit }) },
@@ -1166,6 +1179,81 @@ function checkHeaders(req, msg) {
 const HTTP_MAX_BODY = 16384;
 const HTTP_MAX_INFLIGHT = 8;
 
+// ── GET /api/latest: the landing page's latest-post previews ─────
+// The newest verified post of each public channel asked for, cleaned, with
+// a title (its subject, else its first line) and its first http(s) link. At
+// most LATEST_MAX c_ ids per request. Each channel's answer is cached
+// LATEST_TTL ms in process (also when it has no post, or failed), in a
+// bounded LRU map; ids the hub does not know go to a separate bounded map,
+// so a flood of random ids cannot evict real channels. Concurrent requests
+// for one channel share one hub fetch. Page views therefore cost the hub at
+// most one lookup per channel per TTL.
+const LATEST_MAX = 8;
+const LATEST_TTL = Number(process.env.CLANK_LATEST_TTL_MS) > 0 ? Number(process.env.CLANK_LATEST_TTL_MS) : 60000;
+const LATEST_CACHE_MAX = Number(process.env.CLANK_LATEST_CACHE_MAX) > 0 ? Number(process.env.CLANK_LATEST_CACHE_MAX) : 512;
+const latestCache = new Map();   // c_id -> { at, item }, least recently used first
+const latestUnknown = new Map(); // c_id -> { at }: the hub answered 404
+const latestPending = new Map(); // c_id -> the one in-flight fetch
+
+function lruGet(map, k) {
+  const e = map.get(k);
+  if (!e) return undefined;
+  map.delete(k);
+  if (Date.now() - e.at >= LATEST_TTL) return undefined;
+  map.set(k, e);
+  return e;
+}
+function lruSet(map, k, e) {
+  map.delete(k);
+  map.set(k, e);
+  while (map.size > LATEST_CACHE_MAX) map.delete(map.keys().next().value);
+}
+
+function previewOf(ch, p) {
+  const lines = cleanText(p.body).split("\n").map(l => l.trim()).filter(Boolean);
+  const title = trunc(cleanLine(p.subject || "").trim() || lines[0] || "", 160);
+  let link = null;
+  const m = /https?:\/\/[^\s<>"]+/.exec(lines.join("\n"));
+  if (m && m[0].length <= 1000) {
+    try {
+      const u = new URL(m[0]);
+      if (u.protocol === "https:" || u.protocol === "http:") link = u.href;
+    } catch { /* not a URL */ }
+  }
+  return { channel: ch.id, slug: ch.slug, id: p.id, ts: p.ts, title, link };
+}
+
+async function latestItem(ctx, cid) {
+  const hit = lruGet(latestCache, cid);
+  if (hit) return hit.item;
+  if (lruGet(latestUnknown, cid)) return null;
+  let p = latestPending.get(cid);
+  if (!p) {
+    // Its own deadline, not a requester's: other requests may share it.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10000);
+    p = (async () => {
+      let item = null;
+      try {
+        const c = { ...ctx, channels: {}, signal: ac.signal };
+        const ch = await resolveChannel(c, cid);
+        if (ch.read === "public") {
+          const r = await recentPosts(c, ch, posts => posts.length >= 1, 1);
+          const post = r.posts[r.posts.length - 1];
+          if (post) item = previewOf(ch, post);
+        }
+      } catch (e) {
+        if (ac.signal.aborted) return null; // timed out: not cached
+        if (e instanceof ClankError && e.code === "E_NOT_FOUND") { lruSet(latestUnknown, cid, { at: Date.now() }); return null; }
+      }
+      lruSet(latestCache, cid, { at: Date.now(), item });
+      return item;
+    })().finally(() => { clearTimeout(timer); latestPending.delete(cid); });
+    latestPending.set(cid, p);
+  }
+  return p;
+}
+
 function runHttpMCP(ctx, opt) {
   MODE = "mcp";
   ctx.noKey = true;
@@ -1194,8 +1282,49 @@ function runHttpMCP(ctx, opt) {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
     res.end(body === null ? "" : JSON.stringify(body));
   };
+  // /api/latest has its own request budget and its own in-flight cap, so
+  // page views (or a flood of them) never use /mcp's slots or tokens.
+  const LATEST_INFLIGHT = 3;
+  let latestInflight = 0;
+  let lTokens = 40, lLast = Date.now();
+  const takeLatest = () => {
+    const now = Date.now();
+    lTokens = Math.min(40, lTokens + (now - lLast) / 1000 * 10);
+    lLast = now;
+    if (lTokens < 1) return false;
+    lTokens -= 1;
+    return true;
+  };
+  const serveLatest = async (req, res, url) => {
+    // Public data, no credentials and no CORS headers: no Origin rule here
+    // (a same-origin GET from the page carries none).
+    if (req.method !== "GET" && req.method !== "HEAD") return reply(res, 405, { error: "GET only" }, { Allow: "GET, HEAD" });
+    const q = new URL(url, "http://local").searchParams;
+    const raw = q.getAll("c");
+    const ids = raw.length === 1 && raw[0].length <= 600 ? [...new Set(raw[0].split(","))] : [];
+    if (!ids.length || ids.length > LATEST_MAX || ids.some(id => !CID.test(id)) || [...q.keys()].some(k => k !== "c")) {
+      return reply(res, 400, { error: "want ?c= with 1-" + LATEST_MAX + " comma-separated c_ channel ids" });
+    }
+    if (latestInflight >= LATEST_INFLIGHT || !takeLatest()) return reply(res, 429, { error: "busy: retry in a few seconds" }, { "Retry-After": "2" });
+    latestInflight++;
+    let timer;
+    try {
+      // Each channel's fetch has its own 10 s deadline (latestItem); the
+      // request gives up at 11 s whatever happens.
+      const items = await Promise.race([
+        Promise.all(ids.map(id => latestItem(ctx, id))).then(all => all.filter(Boolean)),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("timeout")), 11000); }),
+      ]);
+      // The answer is cached here, in process, not by browsers: this reply
+      // says no-store, and nginx replaces that with the site's no-transform.
+      reply(res, 200, { items });
+    } catch {
+      reply(res, 504, { error: "timed out" });
+    } finally { clearTimeout(timer); latestInflight--; }
+  };
   const server = http.createServer((req, res) => {
     const url = req.url || "";
+    if (url === "/api/latest" || url.startsWith("/api/latest?")) { req.resume(); return void serveLatest(req, res, url); }
     if (url !== "/mcp" && !url.startsWith("/mcp?")) return reply(res, 404, { error: "not found" });
     const origin = req.headers.origin;
     if (origin !== undefined && !origins.has(origin)) return reply(res, 403, rpcError(null, -32600, "Origin not allowed"));

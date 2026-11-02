@@ -147,6 +147,8 @@ var (
 	keyLine  = regexp.MustCompile(`^k_[a-z2-7]{52}\n$`)
 	postLine = regexp.MustCompile(`^m_[a-z2-7]{8} (#[a-z0-9-]+ )?(@[a-z0-9-]+|k_[a-z2-7]{4}…[a-z2-7]{4}) \d{4}-\d\d-\d\dT\d\d:\d\dZ (re:m_[a-z2-7]{8} )?\S`)
 	nextLine = regexp.MustCompile(`^next: --after [0-9]+`)
+	// MCP output names the paging value instead of the CLI flag.
+	cursorLine = regexp.MustCompile(`^cursor: ([0-9]+)$`)
 )
 
 // postLines splits read/digest output into post lines and the cursor line.
@@ -621,8 +623,19 @@ func TestClankMCPStdio(t *testing.T) {
 	}
 	read := tool("clank_read", map[string]any{"channel": "#mcp-room"}, false)
 	lines := strings.Split(read, "\n")
-	if len(lines) != 4 || lines[0] != "<untrusted-channel-content>" || !postLine.MatchString(lines[1]) || !strings.Contains(lines[1], " @mcpbot ") || !strings.HasSuffix(lines[1], "Z hi from mcp") || !nextLine.MatchString(lines[2]) || lines[3] != "</untrusted-channel-content>" {
+	if len(lines) != 4 || lines[0] != "<untrusted-channel-content>" || !postLine.MatchString(lines[1]) || !strings.Contains(lines[1], " @mcpbot ") || !strings.HasSuffix(lines[1], "Z hi from mcp") || !cursorLine.MatchString(lines[2]) || lines[3] != "</untrusted-channel-content>" {
 		t.Fatalf("read: %q", read)
+	}
+	// The cursor value goes back in as clank_read's after: only newer posts.
+	if got := tool("clank_post", map[string]any{"channel": "#mcp-room", "text": "second from mcp"}, false); !strings.HasPrefix(got, "posted m_") {
+		t.Fatalf("post 2: %q", got)
+	}
+	if got := tool("clank_read", map[string]any{"channel": "#mcp-room", "after": "x"}, true); !strings.Contains(got, "after must be the C of a previous 'cursor: C' line") {
+		t.Fatalf("bad after in MCP: %q", got)
+	}
+	newer := tool("clank_read", map[string]any{"channel": "#mcp-room", "after": cursorLine.FindStringSubmatch(lines[2])[1]}, false)
+	if nl := strings.Split(newer, "\n"); len(nl) != 4 || !strings.HasSuffix(nl[1], "Z second from mcp") || !cursorLine.MatchString(nl[2]) {
+		t.Fatalf("read after the cursor: %q", newer)
 	}
 	// Errors are tool results with isError, naming the tool to call next.
 	b := newAgent(t, h)
@@ -638,9 +651,13 @@ func TestClankMCPStdio(t *testing.T) {
 	if got := tool("clank_subscribe", map[string]any{"channel": "#closed"}, false); got != "subscribed #closed (digest shows posts from now on)" {
 		t.Fatalf("subscribe: %q", got)
 	}
+	// The first digest after a subscription explains why it is empty.
+	if got := tool("clank_digest", map[string]any{}, false); !strings.HasPrefix(got, "<untrusted-channel-content>\nno new posts (subscriptions start now; the first digest is usually empty)\ncursor: ") {
+		t.Fatalf("first digest: %q", got)
+	}
 	b.ok("post", "#closed", "news for subscribers")
 	dig := tool("clank_digest", map[string]any{}, false)
-	if !strings.HasPrefix(dig, "<untrusted-channel-content>\nm_") || !strings.Contains(dig, " #closed k_") || !strings.Contains(dig, "Z news for subscribers\nnext: --after ") {
+	if !strings.HasPrefix(dig, "<untrusted-channel-content>\nm_") || !strings.Contains(dig, " #closed k_") || !strings.Contains(dig, "Z news for subscribers\ncursor: ") {
 		t.Fatalf("digest: %q", dig)
 	}
 	if e := p.call("tools/call", map[string]any{"name": "clank_nope", "arguments": map[string]any{}}); e["error"].(map[string]any)["code"] != float64(-32602) {
@@ -781,7 +798,7 @@ func TestClankMCPHTTPReadOnly(t *testing.T) {
 		t.Fatalf("hosted tools: %s", got)
 	}
 	read := toolText(t, rpc(t, url, 3, "tools/call", map[string]any{"name": "clank_read", "arguments": map[string]any{"channel": "#public-room"}}), false)
-	if !strings.Contains(read, " readable over http\nnext: --after ") || !strings.HasPrefix(read, "<untrusted-channel-content>\n") {
+	if !strings.Contains(read, " readable over http\ncursor: ") || !strings.HasPrefix(read, "<untrusted-channel-content>\n") {
 		t.Fatalf("read over http: %q", read)
 	}
 	chans := toolText(t, rpc(t, url, 4, "tools/call", map[string]any{"name": "clank_channels", "arguments": map[string]any{"query": "public"}}), false)

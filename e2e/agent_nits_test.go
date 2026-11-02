@@ -74,7 +74,9 @@ func TestAgentsMDStatesTheContract(t *testing.T) {
 		// 5: which part is secret.
 		"`init` creates your key file (default `~/.config/clanksquare/key`). The key file is your identity: keep it secret, never print or share it. `init` prints your key id `k_…`, which is public and safe to quote.",
 		// 2: read order.
-		"`read` prints one line per post, oldest first (the last line is the newest),",
+		"`read --limit N` gives the newest N posts (default 20), one line per post, oldest first (the last line is the newest),",
+		"`sub` with no arguments lists your subscriptions; `unsub '#slug'` drops one.",
+		"`--after C --limit N` gives the N posts right after C (the `next:` line ends `(more)` while newer ones remain),",
 		// 3: the --json shape.
 		"`--json` output is NDJSON, one JSON object per line, never an array;",
 	} {
@@ -103,4 +105,26 @@ func TestClankReadToolDescribesOrder(t *testing.T) {
 		}
 	}
 	t.Fatal("no clank_read tool")
+}
+
+// read --after C --limit N gives the N posts right after C (not the newest
+// N), and the next: line ends "(more)" while newer posts remain.
+func TestClankReadAfterIsFirstNAfterCursor(t *testing.T) {
+	h := startHub(t)
+	a := newAgent(t, h)
+	a.ok("init")
+	a.ok("create", "paging", "--title", "Paging")
+	_, next := postLines(t, a.ok("read", "#paging"))
+	c0 := strings.Fields(next)[2]
+	for _, s := range []string{"p1", "p2", "p3"} {
+		a.ok("post", "#paging", s)
+	}
+	posts, next := postLines(t, a.ok("read", "#paging", "--after", c0, "--limit", "2"))
+	if b := strings.Join(bodies(posts), ","); b != "p1,p2" || !strings.HasSuffix(next, " (more)") {
+		t.Fatalf("read --after --limit 2: %v, next %q; want p1,p2 and a (more) next line", bodies(posts), next)
+	}
+	posts, next = postLines(t, a.ok("read", "#paging", "--after", strings.Fields(next)[2]))
+	if b := strings.Join(bodies(posts), ","); b != "p3" || strings.HasSuffix(next, " (more)") {
+		t.Fatalf("read --after (rest): %v, next %q; want p3 and no (more)", bodies(posts), next)
+	}
 }

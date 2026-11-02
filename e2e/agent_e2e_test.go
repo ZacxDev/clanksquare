@@ -224,7 +224,7 @@ func TestClankCLI(t *testing.T) {
 	idB := strings.TrimSpace(b.ok("init"))
 
 	// name, whoami
-	if got := a.ok("name", "alice"); got != "@alice\n" {
+	if got := a.ok("name", "alice"); got != "claimed @alice for "+idA {
 		t.Fatalf("name: %q", got)
 	}
 	if got := a.ok("whoami"); got != "key="+strings.TrimSpace(idA)+" handle=@alice hub="+h.URL+" hub_name="+hubName+" key_file="+a.key+"\n" {
@@ -246,7 +246,7 @@ func TestClankCLI(t *testing.T) {
 
 	// channels: no key needed, the new channel is listed.
 	anon := newAgent(t, h)
-	if got := anon.ok("channels"); !strings.Contains(got, "#sandbox members=1 posts_7d=0 post=members — Sandbox: Test posting here.\n") || !strings.Contains(got, "#hashed members=1 ") {
+	if got := anon.ok("channels"); !strings.Contains(got, "#sandbox members=1 posts_7d=0 post=members read=public — Sandbox: Test posting here.\n") || !strings.Contains(got, "#hashed members=1 ") {
 		t.Fatalf("channels: %q", got)
 	}
 	if _, err := os.Stat(anon.key); !os.IsNotExist(err) {
@@ -316,11 +316,17 @@ func TestClankCLI(t *testing.T) {
 		t.Fatalf("read --after: %q", posts)
 	}
 
-	// --json: one JSON object per post with the full fields.
-	js := a.ok("read", "#sandbox", "--json", "--limit", "1")
+	// --json: NDJSON, one JSON object per post per line (never an array), with
+	// the full fields; oldest first, so the last line is the newest post.
+	js := a.ok("read", "#sandbox", "--json", "--limit", "2")
+	jl := strings.Split(strings.TrimSuffix(js, "\n"), "\n")
 	var obj map[string]any
-	if strings.Count(js, "\n") != 1 || json.Unmarshal([]byte(js), &obj) != nil || obj["body"] != "third" || obj["from"] != strings.TrimSpace(idA) || obj["handle"] != "alice" || obj["cursor"] == nil {
-		t.Fatalf("read --json: %q", js)
+	if len(jl) != 2 || strings.HasPrefix(js, "[") || json.Unmarshal([]byte(jl[0]), &obj) != nil || obj["body"] == "third" {
+		t.Fatalf("read --json (line 1): %q", js)
+	}
+	obj = nil
+	if json.Unmarshal([]byte(jl[1]), &obj) != nil || obj["body"] != "third" || obj["from"] != strings.TrimSpace(idA) || obj["handle"] != "alice" || obj["cursor"] == nil {
+		t.Fatalf("read --json (line 2): %q", js)
 	}
 
 	// digest: B sees A's posts (not its own), ranked; the cursor is saved.
@@ -612,7 +618,7 @@ func TestClankMCPStdio(t *testing.T) {
 	if got := tool("clank_whoami", map[string]any{}, false); !regexp.MustCompile(`^key=k_[a-z2-7]{52} handle=none hub=`).MatchString(got) {
 		t.Fatalf("whoami: %q", got)
 	}
-	if got := tool("clank_set_name", map[string]any{"handle": "mcpbot"}, false); got != "@mcpbot" {
+	if got := tool("clank_set_name", map[string]any{"handle": "mcpbot"}, false); !regexp.MustCompile(`^claimed @mcpbot for k_[a-z2-7]{52}$`).MatchString(got) {
 		t.Fatalf("set_name: %q", got)
 	}
 	if got := tool("clank_create_channel", map[string]any{"slug": "mcp-room", "title": "MCP room"}, false); !strings.HasPrefix(got, "created #mcp-room c_") {

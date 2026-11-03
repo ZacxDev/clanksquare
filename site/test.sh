@@ -214,6 +214,24 @@ code="$(mcp_rpc "$base" server/discover "$(pad 20000)")"
 check '[ "$code" = 413 ]' "a 20 KB POST /mcp is refused 413 (got $code)"
 code="$(get "$base/mcp")"
 check '[ "$code" = 405 ]' "GET /mcp is 405: no GET stream (got $code)"
+# CORS: the image runs the sidecar with --allow-origin '*'. A foreign Origin
+# is served with Access-Control-Allow-Origin: * (once: nginx adds none of its
+# own), and the preflight OPTIONS reaches the sidecar through nginx.
+FOREIGN="https://foreign.example"
+acao_count() { { grep -ci '^access-control-allow-origin:' "$H" || true; }; }
+code="$(get -X POST -H "Origin: $FOREIGN" -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: server/discover' --data "$DISCOVER" "$base/mcp")"
+check '[ "$code" = 200 ] && grep -q "\"supportedVersions\"" "$B" && [ "$(hdr Access-Control-Allow-Origin)" = "*" ] && [ "$(acao_count)" = 1 ]' "POST /mcp from Origin $FOREIGN is 200 with one Access-Control-Allow-Origin: * (got $code, '$(hdr Access-Control-Allow-Origin)' x$(acao_count))"
+check '[ -z "$(hdr Access-Control-Allow-Credentials)" ] && [ -n "$(hdr Content-Security-Policy)" ] && [ "$(hdr Cache-Control)" = no-transform ]' "  ... no Allow-Credentials, and the site's headers"
+code="$(get -X OPTIONS -H "Origin: $FOREIGN" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type,mcp-method,mcp-name,mcp-protocol-version' "$base/mcp")"
+allow_h="$(hdr Access-Control-Allow-Headers | tr 'A-Z' 'a-z')"
+check '[ "$code" = 204 ] && [ "$(hdr Access-Control-Allow-Origin)" = "*" ] && [ "$(acao_count)" = 1 ] && [[ "$(hdr Access-Control-Allow-Methods)" == *POST* ]]' "OPTIONS /mcp (CORS preflight) through nginx is 204 with Access-Control-Allow-Origin: * and POST (got $code, '$(hdr Access-Control-Allow-Origin)', '$(hdr Access-Control-Allow-Methods)')"
+check '( for h in content-type mcp-protocol-version mcp-method mcp-name; do [[ ",${allow_h// /}," == *",$h,"* ]] || exit 1; done )' "  ... Access-Control-Allow-Headers covers content-type, mcp-protocol-version, mcp-method, mcp-name ('$allow_h')"
+check '[ -n "$(hdr Access-Control-Max-Age)" ]' "  ... with an Access-Control-Max-Age"
+# Controls: no Origin, no CORS header; /api/latest sends none even with one.
+code="$(mcp_rpc "$base" server/discover "$DISCOVER")"
+check '[ "$code" = 200 ] && [ "$(acao_count)" = 0 ]' "POST /mcp with no Origin carries no Access-Control-Allow-Origin (got $code)"
+code="$(get -H "Origin: $FOREIGN" "$base/api/latest?c=bad")"
+check '[ "$code" = 400 ] && [ "$(acao_count)" = 0 ]' "GET /api/latest from Origin $FOREIGN carries no Access-Control-Allow-Origin (got $code)"
 
 # ── stub hubs ───────────────────────────────────────────────────────
 XSS='<img src=x onerror=alert(1)>'
@@ -304,9 +322,9 @@ browser() {
   # nix first: it pins the browsers to its Playwright version.
   if command -v nix-shell >/dev/null 2>&1; then
     nix-shell -p python3Packages.playwright playwright-driver.browsers \
-      --run "python3 '$here/browser_check.py' '$1' '$2'"
+      --run "python3 '$here/browser_check.py'$(printf ' %q' "$@")"
   elif python3 -c 'import playwright' >/dev/null 2>&1; then
-    python3 "$here/browser_check.py" "$1" "$2"
+    python3 "$here/browser_check.py" "$@"
   else
     return 127
   fi
@@ -314,7 +332,7 @@ browser() {
 run_browser() {
   local out rc
   set +e
-  out="$(browser "$1" "$2" 2>&1)"
+  out="$(browser "$@" 2>&1)"
   rc=$?
   set -e
   if [ "$rc" = 127 ]; then
@@ -347,6 +365,11 @@ stub_log="$(docker logs "$stub" 2>/dev/null | grep '^STUB ' | tail -n +"$((stub_
 check 'grep -q "^STUB 8080 GET /v1/channels?sort=active 200$" <<<"$stub_log"' "the page fetched the CORS stub (GET /v1/channels?sort=active, 200)"
 check 'grep -q "^STUB 8081 GET /v1/channels?sort=active 200$" <<<"$stub_log"' "the page fetched the no-CORS stub and it answered 200: the browser refused the answer"
 check '[ -n "$stub_log" ] && ! grep -qv " GET /v1/channels?" <<<"$stub_log"' "the page only ever asked the hub for GET /v1/channels (no preflight, no other path)"
+
+# A browser MCP client on another origin (a page served by the stub) calling
+# the production image's /mcp (its sidecar is still running). After the stub
+# log check above: this loads a page from the stub.
+run_browser mcpcors "$cors_hub" "$base"
 
 if [ "${CHECK_LIVE:-0}" = 1 ]; then
   run_browser live "$base"

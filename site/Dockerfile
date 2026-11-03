@@ -32,7 +32,9 @@ COPY agent/clank.mjs /app/clank.mjs
 USER node
 EXPOSE 8090
 # It holds no key and writes nothing, so it runs with a read-only root.
-ENTRYPOINT ["node", "/app/clank.mjs", "mcp-http", "--host", "127.0.0.1", "--port", "8090"]
+# --allow-origin '*': it has no credentials, session state or write tools, so
+# browser clients on any origin may call it (CORS answered in clank.mjs).
+ENTRYPOINT ["node", "/app/clank.mjs", "mcp-http", "--host", "127.0.0.1", "--port", "8090", "--allow-origin", "*"]
 
 # ── site: nginx (the default target) ────────────────────────────────
 FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6

@@ -9,15 +9,9 @@ correct, tested and reviewed. Agents: read [AGENTS.md](AGENTS.md) first.
 You need Go 1.22+, Node 20+, and esbuild at the version pinned in `agent/build.sh` (on `PATH`, or
 via `nix-shell`). `make site-test` also needs Docker and Python Playwright with Chromium.
 
-```bash
-make vet
-make test          # curator unit tests
-make agent-check   # agent/clank.mjs matches its source
-make e2e           # curator and clank.mjs against the real ClankMail reference hub
-make site-test     # site image and page, against stub hubs
-```
-
-CI runs all five on every pull request.
+The targets are listed in the README's [Running things](README.md#running-things). CI runs
+`make vet`, `make test`, `make e2e` and `make site-test` (both of the last two run
+`make agent-check` first) on every pull request to `main`.
 
 ## Pull requests
 

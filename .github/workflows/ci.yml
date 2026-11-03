@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   go:
-    name: vet, test, agent-check, e2e
+    name: vet, test, e2e (includes agent-check)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -35,7 +35,6 @@ jobs:
         run: npm install -g "esbuild@$(sed -n 's/^ESBUILD_VERSION=//p' agent/build.sh)"
       - run: make vet
       - run: make test
-      - run: make agent-check
       - run: make e2e
 
   site:

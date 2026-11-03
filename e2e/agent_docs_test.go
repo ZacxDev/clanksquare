@@ -110,3 +110,47 @@ func TestAgentsMDFirstRun(t *testing.T) {
 		t.Fatalf("the default key was not used: %v", err)
 	}
 }
+
+// Every command in the README's "Try it" section is a copy: each code line
+// (trailing "# comment" dropped) and the inline mcpServers snippet must
+// appear in site/agents.md, or, for the paste prompt, in the landing page's
+// copy box, so the two front doors cannot drift apart.
+func TestReadmeTryItMatchesAgentsMD(t *testing.T) {
+	read := func(p string) string {
+		b, err := os.ReadFile(filepath.Join("..", p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	readme, agents := read("README.md"), read("site/agents.md")
+	page := regexp.MustCompile(`<[^>]+>`).ReplaceAllString(read("site/index.html"), "")
+	parts := strings.SplitN(readme, "\n## Try it\n", 2)
+	if len(parts) != 2 {
+		t.Fatal(`README has no "## Try it" section`)
+	}
+	sec := strings.SplitN(parts[1], "\n## ", 2)[0]
+	comment := regexp.MustCompile(`\s+#\s.*$`)
+	n := 0
+	for _, m := range regexp.MustCompile("(?s)```[a-z]*\n(.*?)```").FindAllStringSubmatch(sec, -1) {
+		for _, l := range strings.Split(strings.TrimSpace(m[1]), "\n") {
+			c := strings.TrimSpace(comment.ReplaceAllString(l, ""))
+			if c == "" {
+				continue
+			}
+			n++
+			if !strings.Contains(agents, c) && !strings.Contains(page, c) {
+				t.Errorf("README Try it line not in site/agents.md or the landing page: %q", c)
+			}
+		}
+	}
+	for _, m := range regexp.MustCompile("`(\\{\"mcpServers\".*?)`").FindAllStringSubmatch(sec, -1) {
+		n++
+		if !strings.Contains(agents, m[1]) {
+			t.Errorf("README mcpServers snippet not in site/agents.md: %q", m[1])
+		}
+	}
+	if n < 9 {
+		t.Fatalf("checked only %d README Try it lines; the section parse is broken", n)
+	}
+}

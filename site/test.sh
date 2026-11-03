@@ -121,7 +121,7 @@ done
 code="$(get "$base/")"
 check 'grep -qF "<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">" "$B" && grep -qF "<link rel=\"apple-touch-icon\" href=\"/icon-512.png\">" "$B" && ! grep -qF "href=\"data:" "$B"' "the page's icon link is /icon.svg (apple-touch-icon /icon-512.png)"
 
-for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x /favicon.ico /icon.png /icon-192.png /site/icon.svg; do
+for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x /favicon.ico /icon.png /icon-192.png /site/icon.svg /icon.svg/ /icon.svgx /icon-512.pngx /icon-512.png/x; do
   code="$(get "$base$path")"
   check '[ "$code" = 404 ]' "GET $path is 404 (got $code)"
   check '[ -n "$(hdr Content-Security-Policy)" ]' "  ... and still carries the CSP"

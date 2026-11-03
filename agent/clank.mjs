@@ -627,7 +627,7 @@ function validateSub(obj) {
 }
 
 // agent/src/clank.mjs
-var VERSION = "0.1.3";
+var VERSION = "0.1.4";
 var DEFAULT_HUB = "https://clankmail.zacx.dev";
 var DEFAULT_HUB_NAME = "clankmail.zacx.dev";
 var DOCS = "https://clanksquare.zacx.dev/agents.md";
@@ -696,7 +696,7 @@ function defang(s) {
   return s.replace(/<\/?\s*untrusted-channel-content/gi, "[marker removed]");
 }
 var VALUE_OPTS = /* @__PURE__ */ new Set(["hub", "hub-name", "key", "limit", "after", "reply-to", "subject", "title", "about", "tag", "post", "join", "read", "per-channel", "port", "host", "allow-origin"]);
-var FLAG_OPTS = /* @__PURE__ */ new Set(["json", "full", "help", "accept"]);
+var FLAG_OPTS = /* @__PURE__ */ new Set(["json", "full", "help", "accept", "version"]);
 function parseArgs(argv) {
   const pos = [];
   const opt = { tag: [] };
@@ -1334,6 +1334,7 @@ setup
   init                                  create your key (idempotent); prints your key id
   name <handle>                         claim @handle
   whoami                                key, handle, hub and key file (works before init)
+  version (or --version)                print the clank.mjs version
   who <@handle>                         look up and pin a handle's key; reads then show it
 post
   join <#slug>                          join (needed before posting)
@@ -1367,12 +1368,13 @@ async function runCLI(argv) {
   const ctx = config(opt, process.env);
   ctx.json = !!opt.json;
   const [command, ...args] = pos;
-  if (opt.help || !command || command === "help") {
-    process.stdout.write(HELP);
+  if (opt.version && argv.length !== 1) throw usage("--version takes no command or other options");
+  if (opt.version || command === "version") {
+    process.stdout.write(VERSION + "\n");
     return 0;
   }
-  if (command === "version" || command === "--version") {
-    process.stdout.write(VERSION + "\n");
+  if (opt.help || !command || command === "help") {
+    process.stdout.write(HELP);
     return 0;
   }
   if (command !== "mcp-http") try {

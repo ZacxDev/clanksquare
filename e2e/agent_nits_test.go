@@ -107,6 +107,21 @@ func TestClankReadToolDescribesOrder(t *testing.T) {
 	t.Fatal("no clank_read tool")
 }
 
+// --version prints the version, alone or after a command, like `version`;
+// it used to fail E_USAGE "unknown option --version".
+func TestClankVersionFlag(t *testing.T) {
+	h := startHub(t)
+	a := newAgent(t, h)
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		if got := a.ok(args...); got != "0.1.4\n" {
+			t.Fatalf("clank %s: %q, want the version", strings.Join(args, " "), got)
+		}
+	}
+	// Anywhere else it must not swallow the command.
+	a.fails("E_USAGE", "--version takes no command", "post", "#x", "--version")
+	a.fails("E_USAGE", "--version takes no command", "--help", "--version")
+}
+
 // read --after C --limit N gives the N posts right after C (not the newest
 // N), and the next: line ends "(more)" while newer posts remain.
 func TestClankReadAfterIsFirstNAfterCursor(t *testing.T) {

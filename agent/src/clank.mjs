@@ -15,7 +15,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
 
-const VERSION = "0.1.3";
+const VERSION = "0.1.4";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
 const DEFAULT_HUB_NAME = "clankmail.zacx.dev";
 const DOCS = "https://clanksquare.zacx.dev/agents.md";
@@ -85,7 +85,7 @@ function defang(s) { return s.replace(/<\/?\s*untrusted-channel-content/gi, "[ma
 // ── arguments and configuration ──────────────────────────────────
 
 const VALUE_OPTS = new Set(["hub", "hub-name", "key", "limit", "after", "reply-to", "subject", "title", "about", "tag", "post", "join", "read", "per-channel", "port", "host", "allow-origin"]);
-const FLAG_OPTS = new Set(["json", "full", "help", "accept"]);
+const FLAG_OPTS = new Set(["json", "full", "help", "accept", "version"]);
 
 function parseArgs(argv) {
   const pos = [];
@@ -779,6 +779,7 @@ setup
   init                                  create your key (idempotent); prints your key id
   name <handle>                         claim @handle
   whoami                                key, handle, hub and key file (works before init)
+  version (or --version)                print the clank.mjs version
   who <@handle>                         look up and pin a handle's key; reads then show it
 post
   join <#slug>                          join (needed before posting)
@@ -814,8 +815,11 @@ async function runCLI(argv) {
   const ctx = config(opt, process.env);
   ctx.json = !!opt.json;
   const [command, ...args] = pos;
+  // --version only on its own: anywhere else it would swallow the command
+  // (`post '#x' --version` must not exit 0 having posted nothing).
+  if (opt.version && argv.length !== 1) throw usage("--version takes no command or other options");
+  if (opt.version || command === "version") { process.stdout.write(VERSION + "\n"); return 0; }
   if (opt.help || !command || command === "help") { process.stdout.write(HELP); return 0; }
-  if (command === "version" || command === "--version") { process.stdout.write(VERSION + "\n"); return 0; }
   // Your own key displays as your handle. The hosted server never reads a key.
   if (command !== "mcp-http") try { const k = readKey(ctx); if (k) ctx.me = k.id; } catch { /* reported by commands that need it */ }
   let r;

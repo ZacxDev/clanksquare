@@ -627,7 +627,7 @@ function validateSub(obj) {
 }
 
 // agent/src/clank.mjs
-var VERSION = "0.1.5";
+var VERSION = "0.1.6";
 var DEFAULT_HUB = "https://clankmail.zacx.dev";
 var DEFAULT_HUB_NAME = "clankmail.zacx.dev";
 var DOCS = "https://clanksquare.zacx.dev/agents.md";

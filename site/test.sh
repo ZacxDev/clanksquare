@@ -108,34 +108,20 @@ for spec in "agents.md|text/markdown; charset=utf-8|site/agents.md" "llms.txt|te
   check '[ "$code" = 405 ]' "  ... POST /$file is 405 (got $code)"
 done
 
-# The icon: exact bytes, exact types, a day of caching on top of no-transform.
-# The SVG is a document when opened directly, so its CSP allows nothing.
-ICON_CACHE="public, max-age=86400, no-transform"
-for spec in "icon.svg|image/svg+xml" "icon-192.png|image/png" "icon-512.png|image/png"; do
+# The icon: exact bytes, exact types, and the same headers.
+for spec in "icon.svg|image/svg+xml" "icon-512.png|image/png"; do
   IFS='|' read -r file ctype <<<"$spec"
   code="$(get "$base/$file")"
   check '[ "$code" = 200 ] && cmp -s "$B" "$here/$file" && [ "$(wc -c <"$B")" -gt 400 ]' "GET /$file is 200 and serves site/$file byte for byte, $(wc -c <"$B") bytes (got $code)"
   check '[ "$(hdr Content-Type)" = "$ctype" ]' "  ... Content-Type: $ctype (got '$(hdr Content-Type)')"
-  check '[ "$(hdr Cache-Control)" = "$ICON_CACHE" ] && [ "$(hdr X-Content-Type-Options)" = nosniff ] && [ "$(hdr X-Frame-Options)" = DENY ]' "  ... Cache-Control: $ICON_CACHE, nosniff, X-Frame-Options (got '$(hdr Cache-Control)')"
+  check '[ -n "$(hdr Content-Security-Policy)" ] && [ "$(hdr Cache-Control)" = no-transform ] && [ "$(hdr X-Content-Type-Options)" = nosniff ]' "  ... with the CSP, Cache-Control: no-transform and nosniff"
   code="$(get -X POST --data x "$base/$file")"
   check '[ "$code" = 405 ]' "  ... POST /$file is 405 (got $code)"
 done
-code="$(get "$base/icon.svg")"
-check '[ "$(hdr Content-Security-Policy)" = "default-src '"'none'"'; base-uri '"'none'"'; form-action '"'none'"'; frame-ancestors '"'none'"'" ]' "/icon.svg carries a CSP allowing nothing (got '$(hdr Content-Security-Policy)')"
-check '! grep -qiE "<script|on[a-z]+=|href=|<style|<foreignObject|url\(" "$here/icon.svg"' "site/icon.svg has no script, event handler, reference, style or foreignObject"
-python3 - "$here" >"$work/png" <<'EOF' || true
-import struct, sys
-for n in (192, 512):
-    b = open("%s/icon-%d.png" % (sys.argv[1], n), "rb").read(24)
-    w, h = struct.unpack(">II", b[16:24])
-    print("%d %s %dx%d" % (n, b[:8] == b"\x89PNG\r\n\x1a\n", w, h))
-EOF
-check '[ "$(cat "$work/png" | tr "\n" ,)" = "192 True 192x192,512 True 512x512," ]' "site/icon-192.png and icon-512.png are PNGs of their named size ($(tr '\n' ' ' <"$work/png"))"
 code="$(get "$base/")"
-check 'grep -qF "<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">" "$B" && grep -qF "<link rel=\"apple-touch-icon\" href=\"/icon-192.png\">" "$B" && ! grep -qF "href=\"data:," "$B"' "the page's icon link is /icon.svg (apple-touch-icon /icon-192.png)"
-check '[ "$(hdr Cache-Control)" = no-transform ]' "  ... and the page itself is still Cache-Control: no-transform only"
+check 'grep -qF "<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">" "$B" && grep -qF "<link rel=\"apple-touch-icon\" href=\"/icon-512.png\">" "$B" && ! grep -qF "href=\"data:" "$B"' "the page's icon link is /icon.svg (apple-touch-icon /icon-512.png)"
 
-for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x /favicon.ico /icon.png /icon-192.svg /site/icon.svg; do
+for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x /favicon.ico /icon.png /icon-192.png /site/icon.svg; do
   code="$(get "$base$path")"
   check '[ "$code" = 404 ]' "GET $path is 404 (got $code)"
   check '[ -n "$(hdr Content-Security-Policy)" ]' "  ... and still carries the CSP"

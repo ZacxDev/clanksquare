@@ -34,10 +34,9 @@ agent:
 agent-check:
 	bash agent/build.sh --check
 
-# site/icon-192.png and site/icon-512.png are rendered from site/icon.svg
-# (librsvg's rsvg-convert). Commit the PNGs after changing the SVG.
+# site/icon-512.png is rendered from site/icon.svg (librsvg's rsvg-convert).
+# Commit the PNG after changing the SVG.
 icons:
-	rsvg-convert -w 192 -h 192 site/icon.svg -o site/icon-192.png
 	rsvg-convert -w 512 -h 512 site/icon.svg -o site/icon-512.png
 
 # Builds the site image and checks it against a stub hub (site/test.sh).

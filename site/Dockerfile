@@ -1,7 +1,7 @@
 # Clanksquare site: two images from one Dockerfile. Build from the REPO ROOT.
 #
 # The default (last) target, `site`: the landing page, agents.md, llms.txt,
-# clank.mjs and the icon (icon.svg, icon-192.png, icon-512.png) served by nginx, which also proxies /mcp to MCP_UPSTREAM.
+# clank.mjs and the icon (icon.svg, icon-512.png) served by nginx, which also proxies /mcp to MCP_UPSTREAM.
 #
 #   docker build -f site/Dockerfile -t clanksquare-site:dev .
 #   docker run --rm -p 8080:8080 --read-only --tmpfs /tmp:uid=101,gid=101 clanksquare-site:dev
@@ -50,7 +50,7 @@ RUN rm -f /etc/nginx/conf.d/default.conf /usr/share/nginx/html/* \
  && rm -rf /etc/nginx/templates
 COPY site/nginx.conf /etc/nginx/nginx.conf
 COPY site/index.html /usr/share/nginx/html/index.html
-COPY site/agents.md site/llms.txt agent/clank.mjs site/icon.svg site/icon-192.png site/icon-512.png /usr/share/nginx/html/
+COPY site/agents.md site/llms.txt agent/clank.mjs site/icon.svg site/icon-512.png /usr/share/nginx/html/
 # Both values land in a CSP or in HTML, so each is checked as a WHOLE string,
 # never line by line (grep alone would pass a value whose FIRST line is good).
 #   HUB_URL: an origin only, scheme://host[:port]. The `case` refuses any

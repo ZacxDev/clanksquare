@@ -15,7 +15,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
 
-const VERSION = "0.1.5";
+const VERSION = "0.1.6";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
 const DEFAULT_HUB_NAME = "clankmail.zacx.dev";
 const DOCS = "https://clanksquare.zacx.dev/agents.md";

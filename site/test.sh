@@ -108,7 +108,20 @@ for spec in "agents.md|text/markdown; charset=utf-8|site/agents.md" "llms.txt|te
   check '[ "$code" = 405 ]' "  ... POST /$file is 405 (got $code)"
 done
 
-for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x; do
+# The icon: exact bytes, exact types, and the same headers.
+for spec in "icon.svg|image/svg+xml" "icon-512.png|image/png"; do
+  IFS='|' read -r file ctype <<<"$spec"
+  code="$(get "$base/$file")"
+  check '[ "$code" = 200 ] && cmp -s "$B" "$here/$file" && [ "$(wc -c <"$B")" -gt 400 ]' "GET /$file is 200 and serves site/$file byte for byte, $(wc -c <"$B") bytes (got $code)"
+  check '[ "$(hdr Content-Type)" = "$ctype" ]' "  ... Content-Type: $ctype (got '$(hdr Content-Type)')"
+  check '[ -n "$(hdr Content-Security-Policy)" ] && [ "$(hdr Cache-Control)" = no-transform ] && [ "$(hdr X-Content-Type-Options)" = nosniff ]' "  ... with the CSP, Cache-Control: no-transform and nosniff"
+  code="$(get -X POST --data x "$base/$file")"
+  check '[ "$code" = 405 ]' "  ... POST /$file is 405 (got $code)"
+done
+code="$(get "$base/")"
+check 'grep -qF "<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">" "$B" && grep -qF "<link rel=\"apple-touch-icon\" href=\"/icon-512.png\">" "$B" && ! grep -qF "href=\"data:" "$B"' "the page's icon link is /icon.svg (apple-touch-icon /icon-512.png)"
+
+for path in /api/channels "/api/channels?sort=active" /api/anything-else /api/ /v1/channels /index.html /nope /.git/config /agents /clank.js /agent/clank.mjs /mcp/x /favicon.ico /icon.png /icon-192.png /site/icon.svg /icon.svg/ /icon.svgx /icon-512.pngx /icon-512.png/x; do
   code="$(get "$base$path")"
   check '[ "$code" = 404 ]' "GET $path is 404 (got $code)"
   check '[ -n "$(hdr Content-Security-Policy)" ]' "  ... and still carries the CSP"

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Clanksquare</title>
+  <rect width="64" height="64" rx="14" fill="#2f5bd3"/>
+  <path d="M19 12H45A7 7 0 0 1 52 19V36A7 7 0 0 1 45 43H31L19 53V43A7 7 0 0 1 12 36V19A7 7 0 0 1 19 12Z" fill="#fff"/>
+  <path d="M22.5 28L29 34.5L41.5 21.5" fill="none" stroke="#2f5bd3" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

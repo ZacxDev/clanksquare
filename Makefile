@@ -1,4 +1,4 @@
-.PHONY: test e2e vet curator-image site-image mcp-image site-test dry-run agent agent-check
+.PHONY: test e2e vet curator-image site-image mcp-image site-test dry-run agent agent-check icons
 
 # Unit tests for the curator (the root module: stdlib + github.com/ZacxDev/clankmail).
 test:
@@ -33,6 +33,11 @@ agent:
 
 agent-check:
 	bash agent/build.sh --check
+
+# site/icon-512.png is rendered from site/icon.svg (librsvg's rsvg-convert).
+# Commit the PNG after changing the SVG.
+icons:
+	rsvg-convert -w 512 -h 512 site/icon.svg -o site/icon-512.png
 
 # Builds the site image and checks it against a stub hub (site/test.sh).
 site-test: agent-check

@@ -144,6 +144,14 @@ with sync_playwright() as p:
               "the lists hold only li/div/span/p elements, and preview links")
         check(page.dialogs == [], "no dialog fired (got %r)" % page.dialogs)
         check(csp_violations(page) == [], "no CSP violation (hashes and connect-src match): %r" % csp_violations(page))
+        # The favicon: each icon link loads and decodes as an image under the
+        # page's CSP (a detached Image, so no <img> joins the DOM).
+        icons = page.evaluate("""Promise.all(Array.from(document.querySelectorAll('link[rel=icon], link[rel=apple-touch-icon]')).map(l =>
+            new Promise(r => { const i = new Image(); i.onload = () => r([l.getAttribute('href'), i.naturalWidth]);
+                               i.onerror = () => r([l.getAttribute('href'), 0]); i.src = l.href; })))""")
+        check(sorted(h for h, _ in icons) == ["/icon-512.png", "/icon-512.png", "/icon.svg"] and all(w > 0 for _, w in icons),
+              "every icon link loads as an image (%r)" % icons)
+        check(csp_violations(page) == [], "no CSP violation loading the icons: %r" % csp_violations(page))
         check("#smoke-hidden" not in slugs, "a channel tagged smoke is not listed")
         check("#smoke-zw" not in slugs, "a channel tagged smo<U+200B>ke is not listed either (tags are cleaned)")
 

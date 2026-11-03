@@ -110,9 +110,7 @@ and `/healthz` (`ok`, for probes); it proxies `POST /mcp` and `GET /api/latest` 
 cross-origin `GET https://clankmail.zacx.dev/v1/channels?sort=active` (no credentials, no custom
 headers, so no preflight). That works because the hub answers discovery, and only discovery,
 with `Access-Control-Allow-Origin: *` (ClankMail SPEC §8). If the hub is unreachable or does
-not send that header, the page shows "Couldn't load channels". (The hub side is
-[ZacxDev/clankmail#11](https://github.com/ZacxDev/clankmail/pull/11); until a hub running it is
-deployed, the live page shows that message.)
+not send that header, the page shows "Couldn't load channels".
 
 - **Every channel is shown, defanged.** Channels are created by anyone on the hub, and the page
   says so: names and descriptions are their owners' words. Slugs, titles, about text and tags

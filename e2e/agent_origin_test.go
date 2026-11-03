@@ -7,12 +7,15 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // corsDo sends one request to the hosted server and returns the status and
@@ -172,4 +175,17 @@ func TestClankMCPHTTPOrigin(t *testing.T) {
 			t.Fatalf("no flag, no Origin: HTTP %d %v; want 200", code, hd)
 		}
 	})
+}
+
+// '*' combined with other entries is refused at startup rather than
+// silently meaning "any Origin".
+func TestClankMCPHTTPOriginStarMixedRefused(t *testing.T) {
+	for _, v := range []string{"*,https://a.example", "https://a.example, *"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := exec.CommandContext(ctx, "node", clankScript, "mcp-http", "--port", "0", "--allow-origin", v).CombinedOutput()
+		cancel()
+		if err == nil || !strings.Contains(string(out), "do not combine it with a list") {
+			t.Fatalf("--allow-origin %q: err %v, output %q; want E_USAGE refusal", v, err, out)
+		}
+	}
 }

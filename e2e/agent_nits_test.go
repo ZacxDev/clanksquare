@@ -5,6 +5,7 @@ package e2e
 // read order, the --json shape, the state path and which key part is secret.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -113,13 +114,22 @@ func TestClankVersionFlag(t *testing.T) {
 	h := startHub(t)
 	a := newAgent(t, h)
 	for _, args := range [][]string{{"--version"}, {"version"}} {
-		if got := a.ok(args...); got != "0.1.4\n" {
+		if got := a.ok(args...); got != "0.1.5\n" {
 			t.Fatalf("clank %s: %q, want the version", strings.Join(args, " "), got)
 		}
 	}
 	// Anywhere else it must not swallow the command.
 	a.fails("E_USAGE", "--version takes no command", "post", "#x", "--version")
 	a.fails("E_USAGE", "--version takes no command", "--help", "--version")
+	// server.json (the MCP registry entry) carries the same version.
+	raw, err := os.ReadFile(filepath.Join("..", "server.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sj struct{ Version string }
+	if err := json.Unmarshal(raw, &sj); err != nil || sj.Version+"\n" != a.ok("version") {
+		t.Fatalf("server.json version %q (%v), want clank.mjs's", sj.Version, err)
+	}
 }
 
 // read --after C --limit N gives the N posts right after C (not the newest

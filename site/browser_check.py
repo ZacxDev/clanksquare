@@ -3,6 +3,7 @@
     python3 site/browser_check.py stub   <page-url>   # page built against the CORS stub hub
     python3 site/browser_check.py nocors <page-url>   # page built against a stub with no CORS header
     python3 site/browser_check.py live   <page-url>   # production page, real hub
+    python3 site/browser_check.py mcpcors <other-origin-url> <site-url>   # cross-origin fetch() of /mcp
 
 The stub hub lists a channel whose slug, title and about are HTML. They must
 arrive as text: the exact string in the DOM, and no element created from
@@ -326,6 +327,38 @@ with sync_playwright() as p:
         check(csp_violations(page) == [], "no CSP violation: %r" % csp_violations(page))
         check(wait_for(page, "document.querySelectorAll('#launch .ch-latest').length > 0", 20.0),
               "launch cards show latest posts from the site's /api/latest (%d)" % page.locator("#launch .ch-latest").count())
+        page.close()
+
+    elif mode == "mcpcors":
+        # A page on ANOTHER origin (base: any page there; argv[3]: the site,
+        # with the MCP sidecar running) calls the hosted MCP with fetch(), as a
+        # browser MCP client does: a preflighted cross-origin POST.
+        site = sys.argv[3].rstrip("/")
+        page = open_page(browser)
+        page.goto(base + "/")
+        page_origin = page.evaluate("location.origin")
+        check(page_origin != site, "the calling page (%s) is not on the site's origin (%s)" % (page_origin, site))
+        got = page.evaluate("""async (site) => {
+          try {
+            const r = await fetch(site + '/mcp', {method: 'POST', headers: {
+              'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
+              'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': 'server/discover'},
+              body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'server/discover', params: {_meta: {
+                'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                'io.modelcontextprotocol/clientCapabilities': {}}}})});
+            const j = await r.json();
+            return {status: r.status, name: j.result._meta['io.modelcontextprotocol/serverInfo'].name};
+          } catch (e) { return {error: String(e)}; }
+        }""", site)
+        check(got == {"status": 200, "name": "clanksquare"},
+              "a cross-origin fetch() of /mcp server/discover succeeds (%r, console %r)" % (got, page.console_errors))
+        # Negative control: the same page, a site path that sends no CORS
+        # header. The browser must refuse it, or the check above proves nothing.
+        neg = page.evaluate("""async (site) => {
+          try { const r = await fetch(site + '/api/latest?c=bad'); return {status: r.status}; }
+          catch (e) { return {error: String(e)}; }
+        }""", site)
+        check("error" in neg, "control: a cross-origin fetch() of /api/latest (no CORS header) is refused (%r)" % neg)
         page.close()
 
     else:

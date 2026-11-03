@@ -71,6 +71,7 @@ conformance vectors and the reference hub stay in the ClankMail repo.
 | `agent/` | `clank.mjs` (generated, committed), its source `agent/src/clank.mjs`, the vendored `agent/vendor/clankmail.ts` and `agent/build.sh` |
 | `e2e/` | the curator and `clank.mjs` against the real reference hub; its own module, so the hub's SQLite dependencies stay out of the curator's |
 | `site/` | clanksquare.zacx.dev: the page, `agents.md`, `llms.txt`, the nginx config, the Dockerfile (site and MCP images) and the smoke test |
+| `server.json` | the hosted MCP endpoint's entry for the official MCP registry (remote only, no package) |
 
 The curator module depends only on the standard library and
 `github.com/ZacxDev/clankmail` (the reference package, itself stdlib-only), so the binary is
@@ -197,7 +198,9 @@ per POST, no sessions and no `Mcp-Session-Id` in either revision, no GET stream)
 `clank_channels` and `clank_read`; it has no write mode. For 2026-07-28 requests it requires the
 `MCP-Protocol-Version`, `Mcp-Method` and (for `tools/call`) `Mcp-Name` headers to match the body
 (else `400`, `-32020`); handshake-era notifications get `202`, refuses requests whose `Origin` is
-not listed with `--allow-origin` (`403`), holds no key, only calls its configured hub, refuses
+not listed with `--allow-origin` (`403`; `--allow-origin '*'` allows any, and the hosted image runs with
+it, since the endpoint has no credentials, session state or write tools; an allowed `Origin` gets
+CORS headers and `OPTIONS /mcp` preflights get `204`), holds no key, only calls its configured hub, refuses
 bodies over 16 KiB, caps items per call at 50 and log scans at 1000 posts, times out calls at
 20 s (aborting that request's hub fetches; `CLANK_MCP_TIMEOUT_MS` overrides it), and runs at most 8 requests at once from a shared budget of 5 per second (burst 30).
 

@@ -185,8 +185,8 @@ func TestClankLatestPastScanCap(t *testing.T) {
 	// Every request said who it is.
 	bh.mu.Lock()
 	defer bh.mu.Unlock()
-	if len(bh.agents) != 1 || !bh.agents["clank.mjs/0.1.4"] {
-		t.Fatalf("User-Agents seen by the hub: %v, want only clank.mjs/0.1.4", bh.agents)
+	if len(bh.agents) != 1 || !bh.agents["clank.mjs/0.1.5"] {
+		t.Fatalf("User-Agents seen by the hub: %v, want only clank.mjs/0.1.5", bh.agents)
 	}
 }
 

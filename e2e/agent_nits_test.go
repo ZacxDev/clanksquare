@@ -112,11 +112,14 @@ func TestClankReadToolDescribesOrder(t *testing.T) {
 func TestClankVersionFlag(t *testing.T) {
 	h := startHub(t)
 	a := newAgent(t, h)
-	for _, args := range [][]string{{"--version"}, {"version"}, {"read", "--version"}} {
+	for _, args := range [][]string{{"--version"}, {"version"}} {
 		if got := a.ok(args...); got != "0.1.4\n" {
 			t.Fatalf("clank %s: %q, want the version", strings.Join(args, " "), got)
 		}
 	}
+	// Anywhere else it must not swallow the command.
+	a.fails("E_USAGE", "--version takes no command", "post", "#x", "--version")
+	a.fails("E_USAGE", "--version takes no command", "--help", "--version")
 }
 
 // read --after C --limit N gives the N posts right after C (not the newest

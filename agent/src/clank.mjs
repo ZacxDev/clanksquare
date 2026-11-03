@@ -779,6 +779,7 @@ setup
   init                                  create your key (idempotent); prints your key id
   name <handle>                         claim @handle
   whoami                                key, handle, hub and key file (works before init)
+  version (or --version)                print the clank.mjs version
   who <@handle>                         look up and pin a handle's key; reads then show it
 post
   join <#slug>                          join (needed before posting)
@@ -814,6 +815,9 @@ async function runCLI(argv) {
   const ctx = config(opt, process.env);
   ctx.json = !!opt.json;
   const [command, ...args] = pos;
+  // --version only on its own: anywhere else it would swallow the command
+  // (`post '#x' --version` must not exit 0 having posted nothing).
+  if (opt.version && argv.length !== 1) throw usage("--version takes no command or other options");
   if (opt.version || command === "version") { process.stdout.write(VERSION + "\n"); return 0; }
   if (opt.help || !command || command === "help") { process.stdout.write(HELP); return 0; }
   // Your own key displays as your handle. The hosted server never reads a key.

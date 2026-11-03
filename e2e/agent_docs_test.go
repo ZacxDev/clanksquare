@@ -113,8 +113,9 @@ func TestAgentsMDFirstRun(t *testing.T) {
 
 // Every command in the README's "Try it" section is a copy: each code line
 // (trailing "# comment" dropped) and the inline mcpServers snippet must
-// appear in site/agents.md, or, for the paste prompt, in the landing page's
-// copy box, so the two front doors cannot drift apart.
+// equal, as a whole, a line or an inline code span of site/agents.md, or,
+// for the paste prompt, a line of the landing page's text, so the two front
+// doors cannot drift apart (a substring match let truncated commands pass).
 func TestReadmeTryItMatchesAgentsMD(t *testing.T) {
 	read := func(p string) string {
 		b, err := os.ReadFile(filepath.Join("..", p))
@@ -123,14 +124,28 @@ func TestReadmeTryItMatchesAgentsMD(t *testing.T) {
 		}
 		return string(b)
 	}
-	readme, agents := read("README.md"), read("site/agents.md")
-	page := regexp.MustCompile(`<[^>]+>`).ReplaceAllString(read("site/index.html"), "")
-	parts := strings.SplitN(readme, "\n## Try it\n", 2)
+	comment := regexp.MustCompile(`\s+#\s.*$`)
+	known := map[string]bool{}
+	add := func(s string) {
+		if c := strings.TrimSpace(comment.ReplaceAllString(s, "")); c != "" {
+			known[c] = true
+		}
+	}
+	agents := read("site/agents.md")
+	for _, l := range strings.Split(agents, "\n") {
+		add(l)
+	}
+	for _, m := range regexp.MustCompile("`([^`\n]+)`").FindAllStringSubmatch(agents, -1) {
+		known[m[1]] = true
+	}
+	for _, l := range strings.Split(regexp.MustCompile(`<[^>]+>`).ReplaceAllString(read("site/index.html"), ""), "\n") {
+		add(l)
+	}
+	parts := strings.SplitN(read("README.md"), "\n## Try it\n", 2)
 	if len(parts) != 2 {
 		t.Fatal(`README has no "## Try it" section`)
 	}
 	sec := strings.SplitN(parts[1], "\n## ", 2)[0]
-	comment := regexp.MustCompile(`\s+#\s.*$`)
 	n := 0
 	for _, m := range regexp.MustCompile("(?s)```[a-z]*\n(.*?)```").FindAllStringSubmatch(sec, -1) {
 		for _, l := range strings.Split(strings.TrimSpace(m[1]), "\n") {
@@ -139,15 +154,15 @@ func TestReadmeTryItMatchesAgentsMD(t *testing.T) {
 				continue
 			}
 			n++
-			if !strings.Contains(agents, c) && !strings.Contains(page, c) {
-				t.Errorf("README Try it line not in site/agents.md or the landing page: %q", c)
+			if !known[c] {
+				t.Errorf("README Try it line is not a whole line of site/agents.md or the landing page: %q", c)
 			}
 		}
 	}
 	for _, m := range regexp.MustCompile("`(\\{\"mcpServers\".*?)`").FindAllStringSubmatch(sec, -1) {
 		n++
-		if !strings.Contains(agents, m[1]) {
-			t.Errorf("README mcpServers snippet not in site/agents.md: %q", m[1])
+		if !known[m[1]] {
+			t.Errorf("README mcpServers snippet is not a whole line of site/agents.md: %q", m[1])
 		}
 	}
 	if n < 9 {

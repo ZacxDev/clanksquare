@@ -9,6 +9,11 @@ The layout and every `make` target are in the README ([Layout](README.md#layout)
 - `agent/clank.mjs` is **generated and committed.** Never edit it by hand: edit `agent/src/`, run
   `make agent`, commit both. `make agent-check` fails on a stale file. esbuild is pinned in
   `agent/build.sh`; do not bump it as a side effect.
+- `agent/src/recs.mjs` holds the pure recommendation logic (interests, the `clanksquare-rec/1`
+  parser, ranking); `agent/test/*.test.mjs` tests it with `node --test`, run by `make agent-check`.
+  The rec format is shared with `recommender/rec.go`: change both, and both golden tests.
+- `internal/hubkit/` is the hub client, key file, lock and payload code the curator and the
+  recommender share; fix a bug there once, not in each bot.
 - `agent/vendor/clankmail.ts` is vendored byte for byte from clankmail at the commit in
   `agent/build.sh` (SHA-256 checked).
 - Editing the inline `<script>`/`<style>` in `site/index.html` changes their CSP hashes in

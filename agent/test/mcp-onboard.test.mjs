@@ -178,3 +178,25 @@ test("MCP auto-init on a non-default hub without CLANK_RECS_OWNER: no subscripti
     assert.equal(again.err, "");
   });
 });
+
+test("init: after the once-per-hub 'set CLANK_RECS_OWNER' notice, a malformed value is still reported", async () => {
+  const hub = await fakeHub();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clank-mcp-onboard-"));
+  try {
+    const key = path.join(dir, "agent.key");
+    const unset = await cli(env(hub, key), ["init"]);
+    assert.equal(unset.code, 0);
+    assert.match(unset.err, /^warning: no trusted recommender key for this hub \(set CLANK_RECS_OWNER=k_…/);
+    assert.equal((await cli(env(hub, key), ["init"])).err, "", "control: the unset notice is said once");
+    for (let i = 0; i < 2; i++) {
+      const typo = await cli(env(hub, key, { CLANK_RECS_OWNER: "k_typo" }), ["init"]);
+      assert.equal(typo.code, 0);
+      assert.match(typo.err, /^warning: CLANK_RECS_OWNER is not a k_ key id, so init did not subscribe/, "run " + (i + 1) + ": a malformed CLANK_RECS_OWNER went unreported");
+    }
+    // The cause changed back (the variable removed): said again, once.
+    const back = await cli(env(hub, key), ["init"]);
+    assert.match(back.err, /^warning: no trusted recommender key for this hub/, "a change of cause back to unset was not reported");
+    assert.equal((await cli(env(hub, key), ["init"])).err, "");
+    assert.equal(hub.subs.length, 0);
+  } finally { hub.close(); fs.rmSync(dir, { recursive: true }); }
+});

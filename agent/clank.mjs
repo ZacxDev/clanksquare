@@ -820,7 +820,7 @@ async function autoSubscribe({ noRecs, done, owner }, deps) {
 // agent/src/clank.mjs
 var VERSION = "0.1.7";
 var DEFAULT_HUB = "https://clankmail.zacx.dev";
-var DEFAULT_HUB_NAME = "clankmail.zacx.dev";
+var DEFAULT_HUB_NAME = DEFAULT_RECS_HUB_NAME;
 var DOCS = "https://clanksquare.zacx.dev/agents.md";
 var ClankError = class extends Error {
   constructor(code, hint, detail) {
@@ -1192,8 +1192,10 @@ async function onboardKey(ctx, k, noRecs) {
       break;
     case "absent":
     case "untrusted": {
-      if (h.recs_noted === r.status) break;
-      h.recs_noted = r.status;
+      const noted = r.status + (r.status === "untrusted" ? ":" + ctx.recsTrust.reason : "");
+      const bad = r.status === "untrusted" && ctx.recsTrust.reason === "bad";
+      if (h.recs_noted === noted && !bad) break;
+      h.recs_noted = noted;
       saveState(ctx);
       warn.push(r.status === "absent" ? "warning: no #" + RECS_SLUG + " channel on this hub, so init did not subscribe to it; " + cmd("recs") + " ranks the channel list instead" : "warning: " + untrustedWhy(ctx) + ", so init did not subscribe to #" + RECS_SLUG + "; " + cmd("recs") + " ranks the channel list instead");
       break;

@@ -17,11 +17,18 @@ const WRITERS = ["saveState", "writePrivate"];
 // analyze: { writes: Set of tool names whose run reaches a writer,
 // flagged: Set of tool names with state: true, tools: all tool names }.
 export function analyze(src) {
-  // Top-level functions: name -> body (up to the next top-level declaration
-  // of any kind: function, const, let, class).
+  // Top-level functions, in every shape a module declares one: function and
+  // async function, export-ed or not, and const/let arrow functions
+  // (`const f = (a) =>`, `const f = async a =>`). name -> body, up to the
+  // next top-level declaration of any kind.
   const fns = {};
-  const decls = [...src.matchAll(/^(?:async function|function|const|let|class)\b/gm)].map(m => m.index);
-  for (const m of src.matchAll(/^(?:async )?function (\w+)\s*\(/gm)) {
+  const decls = [...src.matchAll(/^(?:export\s+)?(?:async\s+function|function|const|let|var|class)\b/gm)].map(m => m.index);
+  const shapes = [
+    /^(?:export\s+)?(?:async\s+)?function\s*\*?\s*(\w+)\s*\(/gm,
+    /^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>/gm,
+    /^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\b/gm,
+  ];
+  for (const re of shapes) for (const m of src.matchAll(re)) {
     const end = decls.find(d => d > m.index) ?? src.length;
     fns[m[1]] = src.slice(m.index + m[0].length, end);
   }
@@ -49,28 +56,46 @@ export function analyze(src) {
   return { tools, flagged, writes, writing };
 }
 
+// unflaggedWriters: the ledger's verdict, the tools that write local state
+// without state: true. Empty is green.
+export function unflaggedWriters(a) { return [...a.writes].filter(t => !a.flagged.has(t)).sort(); }
+
 test("every MCP tool that writes local state is flagged state: true", () => {
   const a = analyze(fs.readFileSync(SRC, "utf8"));
   assert.equal(a.tools.length, 12, "the tool table parse found " + a.tools.length + " tools");
-  for (const t of a.writes) assert.ok(a.flagged.has(t), t + " writes local state but is not flagged state: true");
+  for (const t of unflaggedWriters(a)) assert.fail(t + " writes local state but is not flagged state: true");
   assert.deepEqual([...a.writes].sort(), [
     // clank_interests_show runs opInterests, whose "set" branch writes.
     "clank_create_channel", "clank_digest", "clank_interests_set", "clank_interests_show", "clank_join", "clank_set_name", "clank_subscribe", "clank_whoami",
   ]);
 });
 
-test("the analyzer sees an unflagged writer (positive control)", () => {
+test("the analyzer sees an unflagged writer of every function shape (positive control)", () => {
+  // Writers reached through a plain function, an async arrow, a one-argument
+  // arrow, an exported function and a const function expression: each tool
+  // that reaches one unflagged must turn the ledger red.
   const src = `function saveState(ctx) {}
 async function opWrites(ctx) { helper(ctx); }
 function helper(ctx) { saveState(ctx); }
+const arrowWriter = async (ctx, x) => { saveState(ctx); };
+const oneArg = ctx => saveState(ctx);
+export function exportedWriter(ctx) { saveState(ctx); }
+export const exprWriter = function (ctx) { saveState(ctx); };
 async function opReads(ctx) { return 1; }
 const TOOLS = [
   { name: "clank_a", description: "x", run: (ctx, a) => opWrites(ctx) },
   { name: "clank_b", state: true, description: "y", run: (ctx, a) => opWrites(ctx) },
   { name: "clank_c", description: "z", run: ctx => opReads(ctx) },
+  { name: "clank_d", description: "w", run: ctx => arrowWriter(ctx, 1) },
+  { name: "clank_e", description: "v", run: ctx => exportedWriter(ctx) },
+  { name: "clank_f", description: "u", run: ctx => oneArg(ctx) },
+  { name: "clank_g", description: "t", run: ctx => exprWriter(ctx) },
 ];`;
   const a = analyze(src);
-  assert.deepEqual([...a.writes].sort(), ["clank_a", "clank_b"]);
+  assert.deepEqual([...a.writes].sort(), ["clank_a", "clank_b", "clank_d", "clank_e", "clank_f", "clank_g"]);
   assert.deepEqual([...a.flagged], ["clank_b"]);
-  assert.ok(!a.flagged.has("clank_a"), "clank_a is the unflagged writer the real test must catch");
+  assert.deepEqual(unflaggedWriters(a), ["clank_a", "clank_d", "clank_e", "clank_f", "clank_g"], "each unflagged writer turns the ledger red");
+  // Flag them all: green.
+  const fixed = analyze(src.replace(/\{ name: "(clank_[adefg])", description/g, '{ name: "$1", state: true, description'));
+  assert.deepEqual(unflaggedWriters(fixed), [], "control: flagged writers are green");
 });

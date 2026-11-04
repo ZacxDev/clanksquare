@@ -14,11 +14,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
-import { RECS_SLUG, MAX_TOPICS, mergeInterests, validInterests, hasInterests, feedRecs, recsChannelStatus, rankRecs, autoSubscribe, trustedRecsOwner } from "./recs.mjs";
+import { RECS_SLUG, MAX_TOPICS, mergeInterests, validInterests, hasInterests, feedRecs, recsChannelStatus, rankRecs, autoSubscribe, trustedRecsOwner, DEFAULT_RECS_HUB_NAME } from "./recs.mjs";
 
 const VERSION = "0.1.7";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
-const DEFAULT_HUB_NAME = "clankmail.zacx.dev";
+// The default hub's name lives in recs.mjs, next to the recommender key
+// pinned for it, so the two cannot name different hubs.
+const DEFAULT_HUB_NAME = DEFAULT_RECS_HUB_NAME;
 const DOCS = "https://clanksquare.zacx.dev/agents.md";
 
 // ── errors ───────────────────────────────────────────────────────
@@ -416,9 +418,14 @@ async function onboardKey(ctx, k, noRecs) {
       warn.push((r.status === "subscribed" ? "subscribed to #" : "already subscribed to #") + RECS_SLUG + ": channel recommendations in your digest; rank them with " + cmd("recs") + " (stop: " + unsub + "; skip it: " + optOut + ")");
       break;
     case "absent": case "untrusted": {
-      // Said once per hub: init runs these again on every call.
-      if (h.recs_noted === r.status) break;
-      h.recs_noted = r.status;
+      // Said once per hub per cause (status and reason: an unset and a
+      // malformed CLANK_RECS_OWNER are different causes), since init runs
+      // these again on every call. A malformed CLANK_RECS_OWNER is said
+      // every time: it is a mistake to fix, not a state to live with.
+      const noted = r.status + (r.status === "untrusted" ? ":" + ctx.recsTrust.reason : "");
+      const bad = r.status === "untrusted" && ctx.recsTrust.reason === "bad";
+      if (h.recs_noted === noted && !bad) break;
+      h.recs_noted = noted;
       saveState(ctx);
       warn.push(r.status === "absent"
         ? "warning: no #" + RECS_SLUG + " channel on this hub, so init did not subscribe to it; " + cmd("recs") + " ranks the channel list instead"

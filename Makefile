@@ -1,4 +1,4 @@
-.PHONY: test e2e vet curator-image recommender-image site-image mcp-image stdio-image site-test docker-mcp-check dry-run agent agent-check icons
+.PHONY: test e2e vet curator-image recommender-image site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons
 
 # Unit tests for the curator and the recommender (the root module: stdlib + github.com/ZacxDev/clankmail).
 test:
@@ -28,10 +28,6 @@ site-image:
 mcp-image:
 	docker build -f site/Dockerfile --target mcp -t clanksquare-mcp:dev .
 
-# The stdio MCP server (all tools), from the root Dockerfile: what Glama builds.
-stdio-image:
-	docker build -t clanksquare:dev .
-
 # agent/clank.mjs is GENERATED from agent/src/clank.mjs and the vendored
 # agent/vendor/clankmail.ts (pinned clankmail commit, esbuild version: see
 # agent/build.sh). Commit the generated file; agent-check fails if it is stale.
@@ -51,9 +47,11 @@ icons:
 site-test: agent-check
 	bash site/test.sh
 
-# Builds the root Dockerfile and checks MCP introspection over stdio with
-# --network none (agent/docker-test.sh).
-docker-mcp-check: agent-check
+# Builds the root Dockerfile (the stdio MCP server, what Glama builds) and
+# checks MCP introspection over stdio with --network none
+# (agent/docker-test.sh). It checks the committed agent/clank.mjs as the image
+# ships it; agent-check (in e2e) is what keeps that file fresh.
+docker-mcp-check:
 	bash agent/docker-test.sh
 
 # What the curator would post now, with the example config, against the live

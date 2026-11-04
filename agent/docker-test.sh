@@ -9,12 +9,12 @@
 # notifications/initialized, tools/list) into `docker run -i --rm --network
 # none` and checks: the server answers both requests, stdout is JSON-RPC and
 # nothing else, the tool set is exactly the pinned one, and no key file (so
-# no subscription: that needs a key) is written to /data. Controls: a tool
-# call that creates a key DOES leave one in /data (so an empty /data means
-# something), and with CLANK_NO_RECS=0 the new key's #recommendations
-# subscription is attempted (and fails: no network) while the image's own
-# CLANK_NO_RECS=1 attempts none. Needs docker and python3; no network after
-# the build.
+# no subscription: that needs a key) is written to /data, nor is a
+# #recommendations subscription attempted. Controls: a tool call that creates
+# a key DOES leave one in /data, and its auto-subscription attempt DOES show
+# on stderr (it fails: no network), so both "nothing happened" checks can see
+# the thing they rule out. Needs docker and python3; no network after the
+# build.
 #
 # Prints one "ok"/"not ok" line per check and a count; exits 0 only if every
 # check passed.
@@ -116,18 +116,16 @@ check '[ -z "$left" ]' "introspection writes nothing to /data: no key, so no sub
 check '! grep -q "recommendations" "$work/intro.err"' "introspection attempts no #recommendations subscription (stderr: $(head -c 200 "$work/intro.err" | tr '\n' ' '))"
 
 # ── controls ────────────────────────────────────────────────────────
-# A key-creating tool call leaves a key in /data: the empty-/data check above
-# can see one. The image's CLANK_NO_RECS=1 means no subscription attempt.
+# A key-creating tool call leaves a key in /data and, as in the CLI, tries to
+# subscribe the new key to #recommendations (no network: it fails and says so
+# on stderr). These are the positive controls for the two introspection
+# checks above: each can see what it says did not happen.
 printf '%s\n' "$INIT" "$INITIALIZED" "$WHOAMI" >"$work/whoami.in"
 mcp whoami "$work/whoami.in"
 left="$(data whoami)"
 check 'grep -qx key <<<"$left"' "control: clank_whoami creates /data/key in the image's default config (found: $(tr '\n' ' ' <<<"$left"))"
 check 'grep -q "\"id\":3" "$work/whoami.out" && grep -q "k_[a-z2-7]\{52\}" "$work/whoami.out"' "control: clank_whoami answers with the new key id"
-check '! grep -q "recommendations" "$work/whoami.err"' "control: with the image's CLANK_NO_RECS=1 the new key attempts no #recommendations subscription (stderr: $(head -c 200 "$work/whoami.err" | tr '\n' ' '))"
-# Positive control for the check above: with CLANK_NO_RECS=0 the attempt
-# happens, and with no network it fails, saying so on stderr.
-mcp recs "$work/whoami.in" -e CLANK_NO_RECS=0
-check 'grep -q "#recommendations" "$work/recs.err"' "control: with CLANK_NO_RECS=0 the same call attempts the subscription (stderr: $(head -c 200 "$work/recs.err" | tr '\n' ' '))"
+check 'grep -q "could not subscribe to #recommendations" "$work/whoami.err"' "control: the new key's #recommendations subscription is attempted, and shows on stderr (stderr: $(head -c 200 "$work/whoami.err" | tr '\n' ' '))"
 
 echo "# $pass passed, $fail failed"
 [ "$fail" = 0 ]

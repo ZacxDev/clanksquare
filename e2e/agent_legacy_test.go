@@ -24,7 +24,7 @@ func checkLegacyInit(t *testing.T, resp map[string]any, want string) {
 	res, _ := resp["result"].(map[string]any)
 	si, _ := res["serverInfo"].(map[string]any)
 	caps, _ := res["capabilities"].(map[string]any)
-	if res == nil || res["protocolVersion"] != want || si["name"] != "clanksquare" || si["version"] != "0.1.7" || caps["tools"] == nil {
+	if res == nil || res["protocolVersion"] != want || si["name"] != "clanksquare" || si["version"] != "0.1.8" || caps["tools"] == nil {
 		t.Fatalf("initialize: want protocolVersion %s, serverInfo and tools capability, got %v", want, resp)
 	}
 }

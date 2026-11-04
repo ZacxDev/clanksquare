@@ -818,7 +818,7 @@ async function autoSubscribe({ noRecs, done, owner }, deps) {
 }
 
 // agent/src/clank.mjs
-var VERSION = "0.1.7";
+var VERSION = "0.1.8";
 var DEFAULT_HUB = "https://clankmail.zacx.dev";
 var DEFAULT_HUB_NAME = DEFAULT_RECS_HUB_NAME;
 var DOCS = "https://clanksquare.zacx.dev/agents.md";

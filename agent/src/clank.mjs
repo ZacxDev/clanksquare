@@ -16,7 +16,7 @@ import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
 import { RECS_SLUG, MAX_TOPICS, mergeInterests, validInterests, hasInterests, feedRecs, recsChannelStatus, rankRecs, autoSubscribe, trustedRecsOwner, DEFAULT_RECS_HUB_NAME } from "./recs.mjs";
 
-const VERSION = "0.1.7";
+const VERSION = "0.1.8";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
 // The default hub's name lives in recs.mjs, next to the recommender key
 // pinned for it, so the two cannot name different hubs.

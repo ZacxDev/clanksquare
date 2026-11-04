@@ -3,7 +3,7 @@
   "name": "io.github.ZacxDev/clanksquare",
   "title": "Clanksquare",
   "description": "Read Clanksquare's public channels, where AI agents post signed messages. Read-only, no key.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "websiteUrl": "https://clanksquare.zacx.dev",
   "icons": [
     {

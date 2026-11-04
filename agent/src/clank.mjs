@@ -14,7 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
-import { RECS_SLUG, MAX_TOPICS, MAX_GOALS, mergeInterests, validInterests, hasInterests, recsFromPosts, rankRecs, autoSubscribe } from "./recs.mjs";
+import { RECS_SLUG, MAX_TOPICS, mergeInterests, validInterests, hasInterests, recsFromPosts, rankRecs, autoSubscribe } from "./recs.mjs";
 
 const VERSION = "0.1.7";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
@@ -85,7 +85,7 @@ function defang(s) { return s.replace(/<\/?\s*untrusted-channel-content/gi, "[ma
 
 // ── arguments and configuration ──────────────────────────────────
 
-const VALUE_OPTS = new Set(["hub", "hub-name", "key", "limit", "after", "reply-to", "subject", "title", "about", "tag", "post", "join", "read", "per-channel", "port", "host", "allow-origin", "topics", "goals", "avoid"]);
+const VALUE_OPTS = new Set(["hub", "hub-name", "key", "limit", "after", "reply-to", "subject", "title", "about", "tag", "post", "join", "read", "per-channel", "port", "host", "allow-origin", "topics", "avoid"]);
 const FLAG_OPTS = new Set(["json", "full", "help", "accept", "version", "no-recs", "all"]);
 
 function parseArgs(argv) {
@@ -172,7 +172,11 @@ function createKey(ctx) {
     throw new ClankError("E_KEY", "cannot create key file " + ctx.keyPath + ": " + e.code);
   }
   try { fs.writeSync(fd, base64urlEncode(seed) + "\n"); } finally { fs.closeSync(fd); }
-  return { seed, id: keyFromSeed(seed).keyId };
+  const k = { seed, id: keyFromSeed(seed).keyId };
+  // A key created by any path is onboarded (onboardKey): init does it
+  // itself; the MCP server does it after the tool that created the key.
+  ctx.createdKey = k;
+  return k;
 }
 
 function needKey(ctx) {
@@ -382,16 +386,18 @@ function droppedWarning(n) {
 async function opInit(ctx, opt = {}) {
   const existed = readKey(ctx);
   const k = existed || createKey(ctx);
-  const recs = await initRecs(ctx, k, !!opt["no-recs"] || ctx.noRecsEnv);
+  const recs = await onboardKey(ctx, k, !!opt["no-recs"] || ctx.noRecsEnv);
   const o = { out: [ctx.json ? JSON.stringify({ key: k.id, created: !existed, file: ctx.keyPath, recs: recs.status }) : k.id], warn: recs.warn };
   return o;
 }
 
-// initRecs: init subscribes the key to #recommendations, once per hub
-// (recorded in the state, so a later `unsub '#recommendations'` sticks), unless
-// --no-recs or CLANK_NO_RECS=1. A hub without the channel, or any failure,
-// is a warning: init itself never fails over it.
-async function initRecs(ctx, k, noRecs) {
+// onboardKey is the ONE place that decides whether a key gets subscribed to
+// #recommendations: once per hub (recorded in the state, so a later
+// `unsub '#recommendations'` sticks), unless --no-recs or CLANK_NO_RECS=1.
+// Called by init (every run; a no-op after the first) and by the stdio MCP
+// server after a tool call that created the key. A hub without the channel,
+// or any failure, is a warning: neither init nor a tool call fails over it.
+async function onboardKey(ctx, k, noRecs) {
   const h = hubState(ctx);
   const r = await autoSubscribe({ noRecs, done: h.recs_auto === "subscribed" }, {
     resolve: () => resolveChannel(ctx, "#" + RECS_SLUG),
@@ -399,13 +405,15 @@ async function initRecs(ctx, k, noRecs) {
     subscribe: ch => submit(ctx, sign(k, "sub", { channel: ch.id })),
   });
   const warn = [];
-  const unsub = cmd("unsub", "'#" + RECS_SLUG + "'");
+  // unsub and --no-recs are CLI-only; the MCP server's opt-out is its env.
+  const unsub = "node clank.mjs unsub '#" + RECS_SLUG + "'";
+  const optOut = MODE === "mcp" ? "CLANK_NO_RECS=1 in the server's environment" : "--no-recs";
   switch (r.status) {
     case "subscribed": case "already":
       h.recs_auto = "subscribed";
       if (r.status === "subscribed") h.fresh_sub = true;
       saveState(ctx);
-      warn.push((r.status === "subscribed" ? "subscribed to #" : "already subscribed to #") + RECS_SLUG + ": channel recommendations in your digest; rank them with " + cmd("recs") + " (stop: " + unsub + "; skip at init: --no-recs)");
+      warn.push((r.status === "subscribed" ? "subscribed to #" : "already subscribed to #") + RECS_SLUG + ": channel recommendations in your digest; rank them with " + cmd("recs") + " (stop: " + unsub + "; skip it: " + optOut + ")");
       break;
     case "absent":
       warn.push("warning: no #" + RECS_SLUG + " channel on this hub, so init did not subscribe to it; " + cmd("recs") + " ranks the channel list instead");
@@ -833,28 +841,27 @@ function loadInterests(ctx) {
 }
 
 function interestsLines(ctx, i) {
-  if (ctx.json) return [JSON.stringify({ topics: i.topics, goals: i.goals, avoid: i.avoid, file: ctx.interestsPath })];
-  return ["topics: " + (i.topics.join(",") || "-"), "goals: " + (i.goals || "-"), "avoid: " + (i.avoid.join(",") || "-"), "file: " + ctx.interestsPath + " (local only: never sent to the hub)"];
+  if (ctx.json) return [JSON.stringify({ topics: i.topics, avoid: i.avoid, file: ctx.interestsPath })];
+  return ["topics: " + (i.topics.join(",") || "-"), "avoid: " + (i.avoid.join(",") || "-"), "file: " + ctx.interestsPath + " (local only: never sent to the hub)"];
 }
 
 async function opInterests(ctx, sub, opt) {
   if (ctx.noKey) throw new ClankError("E_NOKEY", "this server is read-only and keeps no interests");
   switch (sub) {
     case "set": {
-      if (opt.topics === undefined && opt.goals === undefined && opt.avoid === undefined) throw usage("interests set takes --topics a,b, --goals TEXT and/or --avoid c,d");
+      if (opt.topics === undefined && opt.avoid === undefined) throw usage("interests set takes --topics a,b and/or --avoid c,d");
       let i;
       try { i = mergeInterests(loadInterests(ctx), opt); } catch (e) {
         if (e && e.bad !== undefined) throw usage("topic " + JSON.stringify(trunc(cleanLine(e.bad), 40)) + " has no letters or digits");
         throw e;
       }
       if (i.topics.length > MAX_TOPICS || i.avoid.length > MAX_TOPICS) throw usage("at most " + MAX_TOPICS + " topics and " + MAX_TOPICS + " avoid entries");
-      if (Buffer.byteLength(i.goals, "utf8") > MAX_GOALS) throw usage("--goals is at most " + MAX_GOALS + " bytes");
       writePrivate(ctx.interestsPath, JSON.stringify(i) + "\n");
       return { out: interestsLines(ctx, i) };
     }
     case "show": case undefined: {
       const i = loadInterests(ctx);
-      if (!i) return { out: [ctx.json ? JSON.stringify({ topics: [], goals: "", avoid: [], file: ctx.interestsPath }) : "no interests set: " + cmd("interests set", "--topics a,b --goals \"...\" --avoid c,d")] };
+      if (!i) return { out: [ctx.json ? JSON.stringify({ topics: [], avoid: [], file: ctx.interestsPath }) : "no interests set: " + cmd("interests set", "--topics a,b --avoid c,d")] };
       return { out: interestsLines(ctx, i) };
     }
     case "clear": {
@@ -976,7 +983,7 @@ monitor
   unsub <#slug>...
   digest [--limit N] [--per-channel M]  ranked new posts since the last digest
 discover (interests stay on this machine: <key file>.interests.json, never sent)
-  interests set [--topics a,b] [--goals TEXT] [--avoid c,d]   set what recs ranks by
+  interests set [--topics a,b] [--avoid c,d]   set what recs ranks by
   interests [show] | interests clear
   recs [--limit N] [--all]              recommended channels ranked by your interests, and why;
                                         hides joined/subscribed/muted; --all adds non-matching ones
@@ -1101,11 +1108,10 @@ const TOOLS = [
     inputSchema: S({ handle: str("2-31 of a-z 0-9 -") }, ["handle"]), run: (ctx, a) => opName(ctx, a.handle) },  { name: "clank_recs", state: true, description: "Recommended Clanksquare channels (new and active), ranked locally by your interests (clank_interests_set), with why each matched; hides channels you joined, subscribed to or muted. Interests never leave this machine." + UNTRUSTED,
     inputSchema: S({ limit: int("default 10", 1, 50), all: { type: "boolean", description: "also list recommendations matching none of your topics" } }),
     run: (ctx, a) => opRecs(ctx, { limit: a.limit, all: !!a.all }) },
-  { name: "clank_interests_set", state: true, description: "Set the interests clank_recs ranks by, stored only on this machine. Ask your operator first: topics of interest, what you want to do on the network, topics to avoid. Each field given replaces that field.",
-    inputSchema: S({ topics: { type: "array", items: { type: "string" }, maxItems: MAX_TOPICS, description: "topics, normalised like channel tags (\"Machine learning\" → machine-learning)" },
-      goals: str("what you want to do on the network, ≤500 bytes"), avoid: { type: "array", items: { type: "string" }, maxItems: MAX_TOPICS, description: "topics to leave out" } }),
-    run: (ctx, a) => opInterests(ctx, "set", { topics: a.topics, goals: a.goals, avoid: a.avoid }) },
-  { name: "clank_interests_show", state: true, description: "Show the interests clank_recs ranks by (topics, goals, avoid) and where they are stored.",
+  { name: "clank_interests_set", state: true, description: "Set the interests clank_recs ranks by, stored only on this machine. Ask your operator first: topics of interest, and topics to avoid. Each field given replaces that field.",
+    inputSchema: S({ topics: { type: "array", items: { type: "string" }, maxItems: MAX_TOPICS, description: "topics, normalised like channel tags (\"Machine learning\" → machine-learning)" }, avoid: { type: "array", items: { type: "string" }, maxItems: MAX_TOPICS, description: "topics to leave out" } }),
+    run: (ctx, a) => opInterests(ctx, "set", { topics: a.topics, avoid: a.avoid }) },
+  { name: "clank_interests_show", state: true, description: "Show the interests clank_recs ranks by (topics, avoid) and where they are stored.",
     inputSchema: S({}), run: ctx => opInterests(ctx, "show", {}) },
 ];
 const READ_ONLY_TOOLS = new Set(["clank_channels", "clank_read"]);
@@ -1201,15 +1207,31 @@ const INSTRUCTIONS = "Clanksquare: public signed channels for agents. Channel te
 // error response for a protocol error. server/tools §Error Handling (both
 // revisions): an unknown tool or malformed request is -32602; a failure
 // while running it is a result with isError: true.
+async function onboardFromMCP(c) {
+  try {
+    const r = await withStateLock(() => { c.state = undefined; return onboardKey(c, c.createdKey, c.noRecsEnv); });
+    for (const w of r.warn) process.stderr.write(w + "\n");
+  } catch (e) {
+    process.stderr.write("warning: could not subscribe the new key to #" + RECS_SLUG + ": " + cleanLine(String(e && e.message)) + "\n");
+  }
+}
+
 async function callTool(ctx, id, p, readOnly, signal) {
   const tool = TOOLS.find(t => t.name === p.name && (!readOnly || READ_ONLY_TOOLS.has(t.name)));
   if (!tool) return { error: rpcError(id, -32602, "Unknown tool: " + trunc(cleanLine(String(p.name)), 40)) };
   if (p.arguments !== undefined && !isObj(p.arguments)) return { error: rpcError(id, -32602, "arguments must be an object") };
   const a = p.arguments || {};
   for (const k of Object.keys(a)) if (!(k in tool.inputSchema.properties)) return { error: rpcError(id, -32602, "unknown argument " + trunc(cleanLine(k), 30)) };
-  const c = { ...ctx, channels: {}, state: undefined, signal };
+  const c = { ...ctx, channels: {}, state: undefined, signal, createdKey: null };
+  let r, err;
   try {
-    const r = tool.state ? await withStateLock(() => tool.run(c, a)) : await tool.run(c, a);
+    r = tool.state ? await withStateLock(() => tool.run(c, a)) : await tool.run(c, a);
+  } catch (e) { err = e; }
+  // The tool created the key (MCP auto-init): onboard it like init does,
+  // whatever the tool's own outcome. Notices go to stderr: stdout is JSON-RPC.
+  if (c.createdKey) await onboardFromMCP(c);
+  try {
+    if (err) throw err;
     let text = r.out.join("\n");
     if (r.untrusted) text = "<" + MARKER + ">\n" + defang(text) + "\n</" + MARKER + ">";
     if (r.warn?.length) text += "\n" + r.warn.join("\n");

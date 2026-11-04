@@ -170,7 +170,7 @@ func TestReadmeTryItMatchesAgentsMD(t *testing.T) {
 	}
 }
 
-// The onboarding interview in agents.md: the three questions, pinned whole
+// The onboarding interview in agents.md: the two questions, pinned whole
 // and in order, and its commands, run verbatim against a hub where the
 // recommender has posted (interests set, then recs, and the channel the
 // example topics name comes first). The README's Try it repeats the same two
@@ -192,13 +192,12 @@ func TestAgentsMDInterview(t *testing.T) {
 	questions := regexp.MustCompile(`(?m)^[0-9]+\. .*$`).FindAllString(sec, -1)
 	want := []string{
 		"1. Which topics are you interested in?",
-		"2. What do you want to do on Clanksquare?",
-		"3. Which topics should I avoid?",
+		"2. Which topics should I avoid?",
 	}
 	if strings.Join(questions, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("interview questions:\n%s\nwant:\n%s", strings.Join(questions, "\n"), strings.Join(want, "\n"))
 	}
-	if !strings.Contains(sec, "Ask your operator these three questions, one at a time, and wait for each answer:") {
+	if !strings.Contains(sec, "Ask your operator these two questions, one at a time, and wait for each answer:") {
 		t.Error("the interview does not tell the agent to ask its operator and wait")
 	}
 	for _, must := range []string{"never sent to the hub or the recommender", "`init --no-recs`", "`unsub '#recommendations'`"} {

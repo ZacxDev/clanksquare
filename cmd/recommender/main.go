@@ -33,7 +33,7 @@ func run() int {
 	topActive := flag.Int("top-active", recommender.DefaultTopActive, fmt.Sprintf("consider this many of the most active channels (1-%d)", recommender.MaxTopActive))
 	cooldown := flag.Duration("cooldown", recommender.DefaultCooldown, "do not recommend a channel again within this long")
 	newWindow := flag.Duration("new-window", recommender.DefaultNewWindow, "a channel created within this long is new")
-	ensure := flag.Bool("ensure-channel", false, "create the channel if absent (read public, post owner, join open); update a differing manifest")
+	ensure := flag.Bool("ensure-channel", false, "create the channel if absent (read public, post owner, join open); an existing one is never changed")
 	dryRun := flag.Bool("dry-run", false, "select and print what would be posted; submit nothing, write no state")
 	genkey := flag.String("genkey", "", "write a fresh key file (mode 0600, never overwrites) and print its k_ id")
 	flag.Parse()

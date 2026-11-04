@@ -87,21 +87,25 @@ func TestEnsureChannelCreatesOnceWithOwnerPolicy(t *testing.T) {
 	if n := w.hub.count("channel"); n != 1 {
 		t.Fatalf("%d channel objects after a second -ensure-channel run, want 1 (not idempotent)", n)
 	}
-	if !strings.Contains(w.out.String(), "exists with the right settings") {
+	if !strings.Contains(w.out.String(), "exists and is ours: nothing to do") {
 		t.Errorf("the second run should say the channel is already right:\n%s", w.out.String())
 	}
 }
 
-func TestEnsureChannelUpdatesADriftedManifest(t *testing.T) {
+// An existing channel of ours is left alone, even if its manifest differs
+// from the one -ensure-channel would create.
+func TestEnsureChannelLeavesAnExistingChannelAlone(t *testing.T) {
 	w := newWorld(t)
-	// The bot's own channel, but postable by members: -ensure-channel fixes it.
-	w.hub.addChannel(w.bot, DefaultSlug, "Old title", "", nil, w.ms(-day), "members")
+	id := w.hub.addChannel(w.bot, DefaultSlug, "Old title", "", nil, w.ms(-day), "owner")
+	before := w.hub.channels[id].manifest
 	if res := w.run(nil); res.ExitCode() != 0 {
 		t.Fatalf("run failed:\n%s", w.out.String())
 	}
-	man, _ := clankmail.Verify(w.hub.channels[w.hub.slugs[DefaultSlug]].manifest)
-	if man.Fields["post"] != "owner" || man.Fields["title"] != ChannelTitle {
-		t.Fatalf("manifest not updated: post=%v title=%v", man.Fields["post"], man.Fields["title"])
+	if w.hub.count("channel") != 1 || w.hub.channels[id].manifest != before {
+		t.Fatalf("the existing channel was changed (%d channel objects)", w.hub.count("channel"))
+	}
+	if !strings.Contains(w.out.String(), "exists and is ours: nothing to do") {
+		t.Errorf("should say it left the channel alone:\n%s", w.out.String())
 	}
 }
 
@@ -122,9 +126,7 @@ func TestSquattedChannelPostsNothing(t *testing.T) {
 	// recommender's own owner check stops them.
 	w.hub.addChannel(w.other, DefaultSlug, "Not the bot", "", nil, w.ms(-day), "anyone")
 	w.hub.addChannel(w.other, "orchids", "Orchids", "", nil, w.ms(-time.Hour), "members")
-	// Without -ensure-channel (the hourly run), nothing else would refuse:
-	// with it, the manifest update the squatter's channel needs is refused too.
-	res := w.run(func(o *Options) { o.EnsureChannel = false })
+	res := w.run(nil)
 	if res.ExitCode() == 0 || w.hub.count("msg") != 0 {
 		t.Fatalf("exit %d, %d posts; want a failure and no posts", res.ExitCode(), w.hub.count("msg"))
 	}

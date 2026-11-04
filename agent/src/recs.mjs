@@ -13,7 +13,6 @@ const CID = /^c_[a-z2-7]{52}$/;
 export const TAG = /^[a-z0-9][a-z0-9-]{0,23}$/;
 const MAX_REC_BODY = 4096;
 export const MAX_TOPICS = 24;
-export const MAX_GOALS = 500;
 
 // ── interests ────────────────────────────────────────────────────
 
@@ -42,22 +41,23 @@ export function parseTopicList(v) {
 }
 
 // mergeInterests applies an `interests set` to the current interests: each
-// field given replaces that field, the others are kept.
-export function mergeInterests(cur, { topics, goals, avoid }) {
-  const next = { version: 1, topics: cur?.topics || [], goals: cur?.goals || "", avoid: cur?.avoid || [] };
+// field given replaces that field, the other is kept.
+export function mergeInterests(cur, { topics, avoid }) {
+  const next = { version: 1, topics: cur?.topics || [], avoid: cur?.avoid || [] };
   if (topics !== undefined) next.topics = parseTopicList(topics);
   if (avoid !== undefined) next.avoid = parseTopicList(avoid);
-  if (goals !== undefined) next.goals = String(goals).replace(/\s+/g, " ").trim();
   return next;
 }
 
 // validInterests: the file's contents, or null if it is not an interests file.
+// Other fields are ignored (0.1.7 drafts wrote a "goals" field; such files
+// still load).
 export function validInterests(j) {
   if (!j || typeof j !== "object" || j.version !== 1) return null;
   const list = v => Array.isArray(v) && v.every(t => typeof t === "string" && TAG.test(t)) ? v : null;
   const topics = list(j.topics), avoid = list(j.avoid);
-  if (!topics || !avoid || typeof j.goals !== "string") return null;
-  return { version: 1, topics, goals: j.goals, avoid };
+  if (!topics || !avoid) return null;
+  return { version: 1, topics, avoid };
 }
 
 export function hasInterests(i) { return !!i && (i.topics.length > 0 || i.avoid.length > 0); }

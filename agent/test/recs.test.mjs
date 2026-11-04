@@ -50,14 +50,19 @@ test("parseTopicList normalises, dedupes in order, and names a bad entry", () =>
 });
 
 test("mergeInterests replaces only the fields given", () => {
-  const a = mergeInterests(null, { topics: "kites,wind", goals: "  find   build logs ", avoid: "poker" });
-  assert.deepEqual(a, { version: 1, topics: ["kites", "wind"], goals: "find build logs", avoid: ["poker"] });
+  const a = mergeInterests(null, { topics: "kites,wind", avoid: "poker" });
+  assert.deepEqual(a, { version: 1, topics: ["kites", "wind"], avoid: ["poker"] });
   const b = mergeInterests(a, { avoid: "cards" });
-  assert.deepEqual(b, { version: 1, topics: ["kites", "wind"], goals: "find build logs", avoid: ["cards"] });
-  assert.equal(validInterests(JSON.parse(JSON.stringify(b))).goals, "find build logs");
-  assert.equal(validInterests({ version: 2, topics: [], goals: "", avoid: [] }), null);
-  assert.equal(validInterests({ version: 1, topics: ["Not A Tag"], goals: "", avoid: [] }), null);
-  assert.equal(validInterests({ version: 1, topics: [], avoid: [] }), null);
+  assert.deepEqual(b, { version: 1, topics: ["kites", "wind"], avoid: ["cards"] });
+  assert.deepEqual(validInterests(JSON.parse(JSON.stringify(b))), b);
+  assert.equal(validInterests({ version: 2, topics: [], avoid: [] }), null);
+  assert.equal(validInterests({ version: 1, topics: ["Not A Tag"], avoid: [] }), null);
+  assert.equal(validInterests({ version: 1, topics: [] }), null);
+});
+
+test("an interests file with a goals field (written by early 0.1.7 drafts) still loads", () => {
+  assert.deepEqual(validInterests({ version: 1, topics: ["kites"], goals: "share build logs", avoid: ["poker"] }),
+    { version: 1, topics: ["kites"], avoid: ["poker"] });
 });
 
 function clank(env, ...args) {
@@ -70,17 +75,25 @@ test("interests set/show/clear: a 0600 file next to the key, never the hub", () 
   const key = path.join(dir, "agent.key");
   const env = { CLANK_KEY: key, HOME: dir };
   // The hub is a closed port: any request would fail the command.
-  let r = clank(env, "interests", "set", "--topics", "Kites,Wind Power", "--goals", "share build logs", "--avoid", "poker");
+  let r = clank(env, "interests", "set", "--topics", "Kites,Wind Power", "--avoid", "poker");
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.out, "topics: kites,wind-power\ngoals: share build logs\navoid: poker\nfile: " + key + ".interests.json (local only: never sent to the hub)\n");
+  assert.equal(r.out, "topics: kites,wind-power\navoid: poker\nfile: " + key + ".interests.json (local only: never sent to the hub)\n");
   const file = key + ".interests.json";
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { version: 1, topics: ["kites", "wind-power"], goals: "share build logs", avoid: ["poker"] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { version: 1, topics: ["kites", "wind-power"], avoid: ["poker"] });
   r = clank(env, "interests", "show", "--json");
-  assert.deepEqual(JSON.parse(r.out), { topics: ["kites", "wind-power"], goals: "share build logs", avoid: ["poker"], file });
+  assert.deepEqual(JSON.parse(r.out), { topics: ["kites", "wind-power"], avoid: ["poker"], file });
   r = clank(env, "interests", "set", "--topics", "!!!");
   assert.equal(r.code, 2);
   assert.match(r.err, /^error: E_USAGE: topic "!!!" has no letters or digits/);
+  // A file with a goals field (early 0.1.7 drafts) loads; goals is ignored.
+  fs.writeFileSync(file, JSON.stringify({ version: 1, topics: ["kites"], goals: "share build logs", avoid: [] }));
+  r = clank(env, "interests", "show");
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, "topics: kites\navoid: -\nfile: " + file + " (local only: never sent to the hub)\n");
+  r = clank(env, "interests", "set", "--goals", "x");
+  assert.equal(r.code, 2, "--goals is gone");
+  assert.match(r.err, /^error: E_USAGE: unknown option --goals/);
   r = clank(env, "interests", "clear");
   assert.equal(r.out, "cleared interests (" + file + ")\n");
   assert.equal(fs.existsSync(file), false);
@@ -141,7 +154,7 @@ const ALL = [REC_POKER, REC_BIRDS, REC_RUST, REC_KITES]; // newest first
 test("a tag match outranks any number of keyword matches", () => {
   // kites is a tag of kite-making and only a keyword of birding-notes, which
   // also matches two more topics by keyword.
-  const i = { version: 1, topics: ["kites", "sightings", "birds"], goals: "", avoid: [] };
+  const i = { version: 1, topics: ["kites", "sightings", "birds"], avoid: [] };
   const { ranked } = rankRecs(ALL, i, NOHIDE);
   assert.deepEqual(ranked.map(x => x.rec.slug), ["kite-making", "birding-notes"]);
   assert.deepEqual(ranked[0].why, ["tag:kites"]);
@@ -157,7 +170,7 @@ test("keyword matches are whole words, multi-word topics as phrases", () => {
 });
 
 test("avoid excludes a rec by tag or keyword, even when a topic matches", () => {
-  const i = { version: 1, topics: ["kites", "cards"], goals: "", avoid: ["wind", "hold-em"] };
+  const i = { version: 1, topics: ["kites", "cards"], avoid: ["wind", "hold-em"] };
   const r = rankRecs(ALL, i, NOHIDE);
   assert.deepEqual(r.ranked.map(x => x.rec.slug), ["birding-notes"]);
   assert.equal(r.avoided, 2);
@@ -166,7 +179,7 @@ test("avoid excludes a rec by tag or keyword, even when a topic matches", () => 
 });
 
 test("joined, subscribed and muted channels and the recs channel are hidden", () => {
-  const i = { version: 1, topics: ["kites", "rust", "cards", "ornithology"], goals: "", avoid: [] };
+  const i = { version: 1, topics: ["kites", "rust", "cards", "ornithology"], avoid: [] };
   const self = { ...REC_KITES, slug: RECS_SLUG, id: cid("s"), tags: ["kites"] };
   const all = rankRecs([...ALL, self], i, NOHIDE);
   assert.deepEqual(all.ranked.map(x => x.rec.slug), ["birding-notes", "poker-night", "rust-gamedev", "kite-making"], "control: nothing hidden (birding-notes: a tag and a keyword)");
@@ -182,7 +195,7 @@ test("no interests: every unhidden rec, unranked, in feed order", () => {
 });
 
 test("without --all, recs matching no topic are left out; --all appends them", () => {
-  const i = { version: 1, topics: ["rust"], goals: "", avoid: [] };
+  const i = { version: 1, topics: ["rust"], avoid: [] };
   assert.deepEqual(rankRecs(ALL, i, NOHIDE).ranked.map(x => x.rec.slug), ["rust-gamedev"]);
   assert.equal(rankRecs(ALL, i, NOHIDE).unmatched, 3);
   assert.deepEqual(rankRecs(ALL, i, NOHIDE, { all: true }).ranked.map(x => x.rec.slug), ["rust-gamedev", "poker-night", "birding-notes", "kite-making"]);

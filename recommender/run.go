@@ -71,8 +71,8 @@ type Options struct {
 	Cooldown time.Duration
 	// NewWindow: a channel created this recently is "new" (default 7 days).
 	NewWindow time.Duration
-	// EnsureChannel creates the recommendations channel if it is absent, and
-	// updates its manifest if it differs from the one above.
+	// EnsureChannel creates the recommendations channel if it is absent. An
+	// existing channel is left as it is (if this key owns it) or fails the run.
 	EnsureChannel bool
 	// DryRun selects and prints; it submits nothing and writes no state.
 	DryRun bool
@@ -201,30 +201,19 @@ func Run(ctx context.Context, opts Options) *Result {
 	return r.res
 }
 
-// manifest is the recommendations channel's genesis (channelID "") or update.
-func (r *runner) manifest(channelID string, ts int64, mods []string) []byte {
+// manifest is the recommendations channel's genesis.
+func (r *runner) manifest(ts int64) []byte {
 	return hubkit.Encode(struct {
 		hubkit.Common
-		Channel string   `json:"channel,omitempty"`
-		Slug    string   `json:"slug"`
-		Title   string   `json:"title"`
-		About   string   `json:"about,omitempty"`
-		Tags    []string `json:"tags,omitempty"`
-		Read    string   `json:"read"`
-		Post    string   `json:"post"`
-		Join    string   `json:"join"`
-		Mods    []string `json:"mods,omitempty"`
-	}{hubkit.Header(r.Key, "channel", ts), channelID, r.Slug, ChannelTitle, ChannelAbout, ChannelTags,
-		policyRead, policyPost, policyJoin, mods})
-}
-
-func manifestDiffers(f map[string]any, slug string) bool {
-	str := func(k string) string { s, _ := f[k].(string); return s }
-	if str("slug") != slug || str("title") != ChannelTitle || str("about") != ChannelAbout ||
-		str("read") != policyRead || str("post") != policyPost || str("join") != policyJoin {
-		return true
-	}
-	return strings.Join(hubkit.StrList(f["tags"]), ",") != strings.Join(ChannelTags, ",")
+		Slug  string   `json:"slug"`
+		Title string   `json:"title"`
+		About string   `json:"about,omitempty"`
+		Tags  []string `json:"tags,omitempty"`
+		Read  string   `json:"read"`
+		Post  string   `json:"post"`
+		Join  string   `json:"join"`
+	}{hubkit.Header(r.Key, "channel", ts), r.Slug, ChannelTitle, ChannelAbout, ChannelTags,
+		policyRead, policyPost, policyJoin})
 }
 
 // submit signs and submits one object; an unknown outcome is settled by
@@ -252,8 +241,8 @@ func (r *runner) submit(ctx context.Context, what string, payload []byte) bool {
 }
 
 // ensureChannel returns the recommendations channel's id, which this key must
-// own. With EnsureChannel it creates the channel when absent and updates a
-// manifest that differs. "" with ok=true is a dry run of an absent channel.
+// own. With EnsureChannel it creates the channel when absent; a channel that
+// exists is never changed. "" with ok=true is a dry run of an absent channel.
 func (r *runner) ensureChannel(ctx context.Context) (string, bool) {
 	resp, err := r.hub.ChannelBySlug(ctx, r.Slug)
 	if hubkit.IsCode(err, "E_NOT_FOUND") {
@@ -261,7 +250,7 @@ func (r *runner) ensureChannel(ctx context.Context) (string, bool) {
 			r.fail("#%s does not exist on this hub: run once with -ensure-channel to create it", r.Slug)
 			return "", false
 		}
-		payload := r.manifest("", r.Now().UnixMilli(), nil)
+		payload := r.manifest(r.Now().UnixMilli())
 		if r.DryRun {
 			r.logf("DRY-RUN", "would create #%s (read=%s post=%s join=%s)", r.Slug, policyRead, policyPost, policyJoin)
 			return "", true
@@ -277,7 +266,7 @@ func (r *runner) ensureChannel(ctx context.Context) (string, bool) {
 		r.fail("#%s lookup failed: %v", r.Slug, err)
 		return "", false
 	}
-	gen, man, err := hubkit.VerifyChannel(resp, r.Slug)
+	gen, _, err := hubkit.VerifyChannel(resp, r.Slug)
 	if err != nil {
 		r.fail("#%s: the hub served a bad channel record: %v", r.Slug, err)
 		return "", false
@@ -286,23 +275,8 @@ func (r *runner) ensureChannel(ctx context.Context) (string, bool) {
 		r.fail("#%s is owned by %s, not this key %s: posting nothing", r.Slug, gen.From, r.me)
 		return "", false
 	}
-	if manifestDiffers(man.Fields, r.Slug) {
-		if !r.EnsureChannel {
-			r.logf("WARN", "#%s manifest differs from the recommender's (run with -ensure-channel to update it)", r.Slug)
-			return resp.Channel, true
-		}
-		ts := max(r.Now().UnixMilli(), man.Fields["ts"].(int64)+1)
-		payload := r.manifest(resp.Channel, ts, hubkit.StrList(man.Fields["mods"]))
-		if r.DryRun {
-			r.logf("DRY-RUN", "#%s manifest differs: would update", r.Slug)
-			return resp.Channel, true
-		}
-		if !r.submit(ctx, "#"+r.Slug+" update", payload) {
-			return "", false
-		}
-		r.logf("INFO", "#%s manifest updated", r.Slug)
-	} else if r.EnsureChannel {
-		r.logf("INFO", "#%s exists with the right settings", r.Slug)
+	if r.EnsureChannel {
+		r.logf("INFO", "#%s exists and is ours: nothing to do", r.Slug)
 	}
 	return resp.Channel, true
 }

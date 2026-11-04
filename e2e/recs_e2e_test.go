@@ -90,7 +90,7 @@ func TestRecommendationsEndToEnd(t *testing.T) {
 	}
 	// Idempotent, and the cooldown holds: a second run creates and posts nothing.
 	out, code = b.run("-ensure-channel")
-	if code != 0 || !strings.Contains(out, "exists with the right settings") || !strings.Contains(out, "posted=0 ") {
+	if code != 0 || !strings.Contains(out, "exists and is ours: nothing to do") || !strings.Contains(out, "posted=0 ") {
 		t.Fatalf("second run: exit %d\n%s", code, out)
 	}
 
@@ -128,7 +128,7 @@ func TestRecommendationsEndToEnd(t *testing.T) {
 
 	// interests + recs: the tag match first, the avoided channel gone, the
 	// unmatched one only with --all.
-	a.ok("interests", "set", "--topics", "Kites,Engines", "--goals", "share build logs", "--avoid", "poker")
+	a.ok("interests", "set", "--topics", "Kites,Engines", "--avoid", "poker")
 	got := a.ok("recs")
 	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
 	want := []string{
@@ -207,7 +207,7 @@ func TestRecsMCPTools(t *testing.T) {
 		t.Helper()
 		return toolText(t, p.call("tools/call", map[string]any{"name": name, "arguments": args}), false)
 	}
-	if got := tool("clank_interests_set", map[string]any{"topics": []any{"Craft"}, "avoid": []any{"knitting"}, "goals": "learn"}); !strings.HasPrefix(got, "topics: craft\ngoals: learn\navoid: knitting\nfile: ") {
+	if got := tool("clank_interests_set", map[string]any{"topics": []any{"Craft"}, "avoid": []any{"knitting"}}); !strings.HasPrefix(got, "topics: craft\navoid: knitting\nfile: ") {
 		t.Fatalf("clank_interests_set: %q", got)
 	}
 	if got := tool("clank_interests_show", map[string]any{}); !strings.HasPrefix(got, "topics: craft\n") {
@@ -216,5 +216,26 @@ func TestRecsMCPTools(t *testing.T) {
 	got := tool("clank_recs", map[string]any{"limit": 5})
 	if !strings.Contains(got, "#loom-weaving [new] tags=craft — Loom weaving (matched tag:craft)") || !strings.HasPrefix(got, "<untrusted-channel-content>") {
 		t.Fatalf("clank_recs: %q", got)
+	}
+}
+
+// An agent that only ever uses the stdio MCP server: its first tool call
+// creates the key and subscribes it to #recommendations, as init would.
+func TestMCPOnboardingSubscribes(t *testing.T) {
+	h := startHub(t)
+	b := newBot(t, h)
+	if out, code := b.run("-ensure-channel"); code != 0 {
+		t.Fatalf("recommender: %s", out)
+	}
+	a := recsAgent(t, h)
+	p := startMCP(t, a)
+	if got := toolText(t, p.call("tools/call", map[string]any{"name": "clank_whoami", "arguments": map[string]any{}}), false); !strings.HasPrefix(got, "key=k_") {
+		t.Fatalf("clank_whoami: %q", got)
+	}
+	if got := toolText(t, p.call("tools/call", map[string]any{"name": "clank_whoami", "arguments": map[string]any{}}), false); !strings.HasPrefix(got, "key=k_") {
+		t.Fatalf("second clank_whoami: %q", got)
+	}
+	if got := subsOf(t, a); !strings.HasPrefix(got, "#recommendations c_") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("an agent onboarded via MCP is not subscribed once to #recommendations: %q", got)
 	}
 }

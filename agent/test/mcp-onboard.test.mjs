@@ -29,19 +29,25 @@ const objectId = tok => "m_" + base32(crypto.createHash("sha256").update(payload
 
 // The fake hub stores channel geneses and subs; it checks no signature (the
 // client verifies what it is served, and the tokens are the client's own).
+// hub.holdSub, if set, is awaited before a sub submit is answered (it is
+// called after the sub is recorded).
 async function fakeHub() {
   const channels = {}; // slug -> { id, token }
   const subs = [];     // { channel, token, from }
+  const hub = {};
   const srv = http.createServer((req, res) => {
     let body = "";
     req.on("data", c => { body += c; });
-    req.on("end", () => {
+    req.on("end", async () => {
       const json = (status, v) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(v)); };
       const u = new URL(req.url, "http://x");
       if (req.method === "POST" && u.pathname === "/v1/submit") {
         const tok = body.trim(), p = JSON.parse(payloadOf(tok)), id = objectId(tok);
         if (p.t === "channel") channels[p.slug] = { id: "c_" + id.slice(2), token: tok };
-        else if (p.t === "sub") subs.push({ channel: p.channel, token: tok, from: p.from });
+        else if (p.t === "sub") {
+          subs.push({ channel: p.channel, token: tok, from: p.from });
+          if (hub.holdSub) await hub.holdSub();
+        }
         return json(200, { id });
       }
       if (req.method === "GET" && u.pathname === "/v1/subs") return json(200, { items: subs.map(s => ({ channel: s.channel, token: s.token })) });
@@ -54,7 +60,7 @@ async function fakeHub() {
     });
   });
   await new Promise(r => srv.listen(0, "127.0.0.1", r));
-  return { url: "http://127.0.0.1:" + srv.address().port, subs, close: () => srv.close() };
+  return Object.assign(hub, { url: "http://127.0.0.1:" + srv.address().port, subs, close: () => { srv.closeAllConnections(); srv.close(); } });
 }
 
 function env(hub, key, extra = {}) {
@@ -199,4 +205,66 @@ test("init: after the once-per-hub 'set CLANK_RECS_OWNER' notice, a malformed va
     assert.equal((await cli(env(hub, key), ["init"])).err, "");
     assert.equal(hub.subs.length, 0);
   } finally { hub.close(); fs.rmSync(dir, { recursive: true }); }
+});
+
+// The stdio server under a signal: started with stdin left OPEN, so only the
+// signal can end it. Returns the child and its collected output.
+function serve(e) {
+  const p = spawn(process.execPath, [CLANK, "mcp"], { env: e });
+  const o = { p, out: "", err: "", exited: new Promise(r => p.on("close", (code, signal) => r({ code, signal }))) };
+  p.stdout.on("data", c => { o.out += c; });
+  p.stderr.on("data", c => { o.err += c; });
+  return o;
+}
+const until = async (cond, what, ms = 5000) => {
+  for (const end = Date.now() + ms; !cond();) {
+    if (Date.now() > end) throw new Error("timed out waiting for " + what);
+    await new Promise(r => setTimeout(r, 10));
+  }
+};
+const INIT_LINE = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "0" } } }) + "\n";
+
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  test(`stdio MCP exits 0 on ${sig} with stdin still open`, async () => {
+    const hub = await fakeHub();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clank-mcp-signal-"));
+    try {
+      const s = serve(env(hub, path.join(dir, "agent.key")));
+      s.p.stdin.write(INIT_LINE);
+      await until(() => s.out.includes('"id":1'), "the initialize answer");
+      const t0 = Date.now();
+      s.p.kill(sig);
+      const r = await Promise.race([s.exited, new Promise(res => setTimeout(() => res("still running"), 3000))]);
+      if (r === "still running") s.p.kill("SIGKILL");
+      assert.deepEqual(r, { code: 0, signal: null }, `${sig} did not end the server cleanly`);
+      assert.ok(Date.now() - t0 < 1000, "exit took " + (Date.now() - t0) + " ms");
+      assert.equal(fs.existsSync(path.join(dir, "agent.key")), false);
+    } finally { hub.close(); fs.rmSync(dir, { recursive: true }); }
+  });
+}
+
+test("stdio MCP on SIGTERM waits for the tool call in flight and its state write", async () => {
+  await withHub(async (hub, dir, owner) => {
+    const key = path.join(dir, "agent.key");
+    let arrived, release;
+    const atHub = new Promise(r => { arrived = r; });
+    hub.holdSub = () => { arrived(); return new Promise(r => { release = r; }); };
+    const s = serve(env(hub, key, { CLANK_RECS_OWNER: owner }));
+    s.p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "clank_whoami", arguments: {}, _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } }) + "\n");
+    // The new key's #recommendations subscription is at the hub, unanswered:
+    // the state lock is held and recs_auto is not yet saved.
+    await atHub;
+    s.p.kill("SIGTERM");
+    const early = await Promise.race([s.exited, new Promise(res => setTimeout(() => res("running"), 300))]);
+    assert.equal(early, "running", "the server exited with a tool call and its state write in flight: " + JSON.stringify(early));
+    release();
+    const r = await Promise.race([s.exited, new Promise(res => setTimeout(() => res("still running"), 3000))]);
+    if (r === "still running") s.p.kill("SIGKILL");
+    assert.deepEqual(r, { code: 0, signal: null });
+    const lines = s.out.split("\n").filter(Boolean);
+    assertPureJSONRPC(lines);
+    assert.equal(JSON.parse(lines[0]).id, 7, "the in-flight call was not answered");
+    const state = JSON.parse(fs.readFileSync(key + ".state.json", "utf8"));
+    assert.equal(state.hubs[hub.url].recs_auto, "subscribed", "the state write was cut off");
+  });
 });

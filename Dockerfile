@@ -17,8 +17,9 @@
 # #recommendations once; run with -e CLANK_NO_RECS=1 to skip that.
 #
 # Introspection (initialize, tools/list), which is all automated checkers such
-# as Glama do, creates no key and makes no hub call; `make docker-mcp-check`
-# checks that with --network none.
+# as Glama do, creates no key and attempts no subscription; `make
+# docker-mcp-check` checks that with --network none. SIGTERM (docker stop)
+# ends the server once requests in flight are answered, with exit 0.
 #
 # The hosted, read-only HTTP server is a different image: site/Dockerfile,
 # target mcp.

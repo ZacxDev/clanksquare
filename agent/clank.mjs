@@ -2118,6 +2118,7 @@ async function handleRPC(ctx, msg, readOnly, signal, t = {}) {
       return httpError(id, -32601, "Method not found: " + trunc(cleanLine(msg.method), 40), 404);
   }
 }
+var STOP_GRACE_MS = 2e3;
 function runStdioMCP(ctx) {
   MODE = "mcp";
   ctx.autoInit = true;
@@ -2162,6 +2163,19 @@ function runStdioMCP(ctx) {
     closed = true;
     done();
   });
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    setTimeout(() => {
+      stateQueue.then(() => process.exit(0));
+    }, STOP_GRACE_MS).unref();
+    if (closed) done();
+    else rl.close();
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  rl.on("SIGINT", stop);
   return new Promise(() => {
   });
 }

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -74,6 +75,9 @@ type Options struct {
 	// EnsureChannel creates the recommendations channel if it is absent. An
 	// existing channel is left as it is (if this key owns it) or fails the run.
 	EnsureChannel bool
+	// DenyOwners and DenySlugs are never recommended: channels owned by these
+	// k_ keys, and these slugs.
+	DenyOwners, DenySlugs map[string]bool
 	// DryRun selects and prints; it submits nothing and writes no state.
 	DryRun bool
 	Client *http.Client
@@ -114,7 +118,47 @@ func (o *Options) Validate() error {
 	if o.Cooldown < 0 || o.NewWindow < 0 {
 		return errors.New("durations must be positive")
 	}
+	for k := range o.DenyOwners {
+		if !reKey.MatchString(k) {
+			return fmt.Errorf("deny owner %q is not a k_ key id", k)
+		}
+	}
+	for s := range o.DenySlugs {
+		if !reSlug.MatchString(s) {
+			return fmt.Errorf("deny slug %q is not a slug", s)
+		}
+	}
 	return nil
+}
+
+var reKey = regexp.MustCompile(`^k_[a-z2-7]{52}$`)
+
+// ParseList reads a deny list: comma-separated entries, or "@path", a file
+// of comma- or newline-separated entries where a line starting "# " (or a
+// bare "#") is a comment. A slug may carry its leading "#". Empty entries
+// are skipped.
+func ParseList(v string) (map[string]bool, error) {
+	if path, ok := strings.CutPrefix(v, "@"); ok {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var keep []string
+		for _, l := range strings.Split(string(raw), "\n") {
+			if t := strings.TrimSpace(l); t == "#" || strings.HasPrefix(t, "# ") {
+				continue
+			}
+			keep = append(keep, l)
+		}
+		v = strings.Join(keep, ",")
+	}
+	out := map[string]bool{}
+	for _, e := range strings.Split(v, ",") {
+		if e = strings.TrimPrefix(strings.TrimSpace(e), "#"); e != "" {
+			out[e] = true
+		}
+	}
+	return out, nil
 }
 
 // Result is the outcome of a run.
@@ -123,7 +167,7 @@ type Result struct {
 	Errors      []string
 	RateLimited bool
 	// Counts of channels looked at and why they were not posted.
-	NewCandidates, ActiveCandidates, Cooldown, Excluded, Invalid int
+	NewCandidates, ActiveCandidates, Cooldown, Excluded, Invalid, Denied, SameOwner int
 }
 
 // ExitCode is 0 for a clean run, 1 if anything failed.
@@ -196,8 +240,8 @@ func Run(ctx context.Context, opts Options) *Result {
 			break
 		}
 	}
-	r.logf("INFO", "posted=%d new_candidates=%d active_candidates=%d cooldown=%d excluded=%d invalid=%d",
-		len(r.res.Posted), r.res.NewCandidates, r.res.ActiveCandidates, r.res.Cooldown, r.res.Excluded, r.res.Invalid)
+	r.logf("INFO", "posted=%d new_candidates=%d active_candidates=%d cooldown=%d excluded=%d invalid=%d denied=%d same_owner=%d",
+		len(r.res.Posted), r.res.NewCandidates, r.res.ActiveCandidates, r.res.Cooldown, r.res.Excluded, r.res.Invalid, r.res.Denied, r.res.SameOwner)
 	return r.res
 }
 
@@ -390,8 +434,8 @@ func (r *runner) recOf(l *listed, reason string) Rec {
 }
 
 // eligible applies the skips both kinds share: not the recommendations
-// channel itself, not a smoke-test leftover, a valid slug, not recommended
-// within the cooldown.
+// channel itself, not a smoke-test leftover, a valid slug, not on a deny
+// list (owner key or slug), not recommended within the cooldown.
 func (r *runner) eligible(chID string, l *listed) bool {
 	if l.id == chID {
 		r.res.Excluded++
@@ -408,6 +452,10 @@ func (r *runner) eligible(chID string, l *listed) bool {
 			return false
 		}
 	}
+	if r.DenyOwners[l.manifest.From] || r.DenySlugs[slug] {
+		r.res.Denied++
+		return false
+	}
 	if prev, ok := r.state.Recommended[l.id]; ok && r.Now().UnixMilli()-prev.At < r.Cooldown.Milliseconds() {
 		r.res.Cooldown++
 		return false
@@ -417,10 +465,24 @@ func (r *runner) eligible(chID string, l *listed) bool {
 
 // selectRecs: channels created within NewWindow (newest first), then the
 // TopActive most active channels with a post in the last 7 days (most
-// active first), each once, skipping what eligible skips; at most MaxPerRun.
+// active first), each once, skipping what eligible skips, at most one per
+// owner key; at most MaxPerRun.
 func (r *runner) selectRecs(ctx context.Context, chID string) []Rec {
 	var picks []Rec
 	taken := map[string]bool{}
+	// One recommendation per owner key per run, so one key creating many
+	// channels cannot fill the run (the manifest's signer is the owner: the
+	// hub takes updates only from the owner).
+	owners := map[string]bool{}
+	take := func(l *listed, reason string) {
+		if owners[l.manifest.From] {
+			r.res.SameOwner++
+			return
+		}
+		owners[l.manifest.From] = true
+		taken[l.id] = true
+		picks = append(picks, r.recOf(l, reason))
+	}
 	cutoff := r.Now().Add(-r.NewWindow).UnixMilli()
 
 	items, err := r.hub.Discovery(ctx, "new", newPageSize, newMaxPages)
@@ -446,8 +508,7 @@ func (r *runner) selectRecs(ctx context.Context, chID string) []Rec {
 		if taken[l.id] || !r.eligible(chID, l) {
 			continue
 		}
-		taken[l.id] = true
-		picks = append(picks, r.recOf(l, ReasonNew))
+		take(l, ReasonNew)
 	}
 
 	items, err = r.hub.Discovery(ctx, "active", r.TopActive, 1)
@@ -468,8 +529,7 @@ func (r *runner) selectRecs(ctx context.Context, chID string) []Rec {
 		if taken[l.id] || !r.eligible(chID, l) {
 			continue
 		}
-		taken[l.id] = true
-		picks = append(picks, r.recOf(l, ReasonActive))
+		take(l, ReasonActive)
 	}
 	return capped(picks, r.MaxPerRun)
 }

@@ -4,6 +4,26 @@
 // file, or in the code that calls it, sends them anywhere.
 
 export const RECS_SLUG = "recommendations";
+
+// The trust root. Slugs are first-come on a hub, so "whoever owns
+// #recommendations" proves nothing: the recommender's key is pinned for the
+// default hub (by hub name), and on any other hub it must be named with
+// CLANK_RECS_OWNER=k_…. Without a trusted key the feed is not read and init
+// does not subscribe.
+export const DEFAULT_RECS_HUB_NAME = "clankmail.zacx.dev";
+export const PINNED_RECS_OWNER = "k_7w7gwci2pnngidx3drdqlrveb32yxckf5tq7v2gtno52hqkocorq";
+const KEY = /^k_[a-z2-7]{52}$/;
+
+// trustedRecsOwner: { owner, source } for this hub, { owner: null, reason }
+// when there is none, or { owner: null, reason: "bad" } for a malformed env.
+export function trustedRecsOwner(hubName, env) {
+  const v = env.CLANK_RECS_OWNER;
+  if (v !== undefined && v !== "") {
+    return KEY.test(v) ? { owner: v, source: "CLANK_RECS_OWNER" } : { owner: null, reason: "bad" };
+  }
+  if (hubName === DEFAULT_RECS_HUB_NAME) return { owner: PINNED_RECS_OWNER, source: "pinned" };
+  return { owner: null, reason: "unset" };
+}
 export const FORMAT_LINE = "clanksquare-rec/1";
 export const REASONS = ["new", "active"];
 
@@ -111,9 +131,10 @@ export function parseRecBody(body) {
 }
 
 // recsFromPosts: the recommendations in a #recommendations log, newest first,
-// one per channel (the newest wins). Only posts signed by the channel's
-// owner count: anyone could otherwise forge one in a channel whose post
-// policy was loosened, or on another hub. Returns { recs, notOwner, malformed }.
+// one per channel (the newest wins). Only posts signed by `owner`, the
+// TRUSTED recommender key (trustedRecsOwner), count; the caller has already
+// checked that this key owns the channel (feedRecs). Returns
+// { recs, notOwner, malformed }.
 export function recsFromPosts(posts, owner) {
   const recs = [], ids = new Set();
   let notOwner = 0, malformed = 0;
@@ -126,6 +147,24 @@ export function recsFromPosts(posts, owner) {
     recs.push({ ...r.rec, ts: p.ts, post: p.id });
   }
   return { recs, notOwner, malformed };
+}
+
+// feedRecs: the recs of a #recommendations channel `ch` ({ owner }) and its
+// posts, for the trusted key `owner`. A channel owned by any other key
+// (squatted, or a different recommender) yields nothing: status "squatted".
+// No trusted key: status "untrusted".
+export function feedRecs(ch, posts, owner) {
+  const status = recsChannelStatus(ch, owner);
+  if (status !== "ok") return { status, recs: [], notOwner: 0, malformed: 0 };
+  return { status, ...recsFromPosts(posts, owner) };
+}
+
+// recsChannelStatus is the one check of a #recommendations channel against
+// the trusted key, used by feedRecs, autoSubscribe and clank.mjs recs:
+// "untrusted" (no key), "squatted" (owned by another key) or "ok".
+export function recsChannelStatus(ch, owner) {
+  if (!owner) return "untrusted";
+  return ch.owner === owner ? "ok" : "squatted";
 }
 
 // ── ranking ──────────────────────────────────────────────────────
@@ -180,17 +219,21 @@ export function rankRecs(recs, interests, hide, { all = false } = {}) {
 // autoSubscribe decides and performs init's subscription to
 // #recommendations. deps: resolve() → the channel (throws { code } on
 // failure), subs() → live subscriptions [{ channel }], subscribe(ch).
+// owner is the trusted recommender key (trustedRecsOwner), or null.
 // Statuses: off (--no-recs), done (an earlier init already subscribed: never
-// again, so an `unsub` sticks), absent (no such channel on this hub), already
-// (subscribed some other way), subscribed, error. It never throws: init must
-// not fail because of it.
-export async function autoSubscribe({ noRecs, done }, deps) {
+// again, so an `unsub` sticks), untrusted (no trusted key for this hub: no
+// hub call), absent (no such channel on this hub), squatted (the channel's
+// owner is not the trusted key), already (subscribed some other way),
+// subscribed, error. It never throws: init must not fail because of it.
+export async function autoSubscribe({ noRecs, done, owner }, deps) {
   if (noRecs) return { status: "off" };
   if (done) return { status: "done" };
+  if (!owner) return { status: "untrusted" };
   let ch;
   try { ch = await deps.resolve(); } catch (e) {
     return e && e.code === "E_NOT_FOUND" ? { status: "absent" } : { status: "error", error: e };
   }
+  if (recsChannelStatus(ch, owner) !== "ok") return { status: "squatted", ch };
   try {
     const live = await deps.subs();
     if (live.some(s => s.channel === ch.id)) return { status: "already", ch };

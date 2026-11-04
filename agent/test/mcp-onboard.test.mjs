@@ -96,11 +96,13 @@ async function withHub(fn) {
   try {
     // The channel, created by another key that does not subscribe itself.
     const ownerEnv = env(hub, path.join(dir, "owner.key"), { CLANK_NO_RECS: "1" });
+    let ownerId = "";
     for (const args of [["init"], ["create", "recommendations", "--title", "Recs", "--post", "owner"]]) {
       const r = await cli(ownerEnv, args);
       assert.equal(r.code, 0, r.err);
+      ownerId ||= r.out.trim();
     }
-    await fn(hub, dir);
+    await fn(hub, dir, ownerId);
   } finally { hub.close(); fs.rmSync(dir, { recursive: true }); }
 }
 
@@ -113,9 +115,10 @@ function assertPureJSONRPC(lines) {
 }
 
 test("MCP auto-init subscribes the new key to #recommendations, once", async () => {
-  await withHub(async (hub, dir) => {
+  await withHub(async (hub, dir, owner) => {
     const key = path.join(dir, "agent.key");
-    const first = await mcp(hub, key);
+    const trust = { CLANK_RECS_OWNER: owner }; // hub.test is not the default hub
+    const first = await mcp(hub, key, trust);
     assertPureJSONRPC(first.lines);
     const res = JSON.parse(first.lines[0]).result;
     assert.equal(res.isError, false, JSON.stringify(res));
@@ -123,7 +126,7 @@ test("MCP auto-init subscribes the new key to #recommendations, once", async () 
     assert.deepEqual(hub.subs.map(s => s.from), [id], "the MCP auto-init path did not subscribe the new key");
     assert.match(first.err, /subscribed to #recommendations: .*CLANK_NO_RECS=1 in the server's environment/);
     // A second server on the same key: the key exists, nothing more is sent.
-    const second = await mcp(hub, key);
+    const second = await mcp(hub, key, trust);
     assertPureJSONRPC(second.lines);
     assert.equal(hub.subs.length, 1, "subscribed twice");
     assert.equal(second.err, "");
@@ -131,8 +134,8 @@ test("MCP auto-init subscribes the new key to #recommendations, once", async () 
 });
 
 test("MCP auto-init with CLANK_NO_RECS=1 does not subscribe", async () => {
-  await withHub(async (hub, dir) => {
-    const r = await mcp(hub, path.join(dir, "quiet.key"), { CLANK_NO_RECS: "1" });
+  await withHub(async (hub, dir, owner) => {
+    const r = await mcp(hub, path.join(dir, "quiet.key"), { CLANK_NO_RECS: "1", CLANK_RECS_OWNER: owner });
     assertPureJSONRPC(r.lines);
     assert.equal(JSON.parse(r.lines[0]).result.isError, false);
     assert.equal(fs.existsSync(path.join(dir, "quiet.key")), true, "control: the key was created");
@@ -144,10 +147,34 @@ test("MCP auto-init on a hub without #recommendations: the tool call still succe
   const hub = await fakeHub();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clank-mcp-onboard-"));
   try {
-    const r = await mcp(hub, path.join(dir, "agent.key"));
+    const r = await mcp(hub, path.join(dir, "agent.key"), { CLANK_RECS_OWNER: "k_" + "a".repeat(52) });
     assertPureJSONRPC(r.lines);
     assert.equal(JSON.parse(r.lines[0]).result.isError, false);
     assert.match(r.err, /^warning: no #recommendations channel on this hub/);
     assert.equal(hub.subs.length, 0);
   } finally { hub.close(); fs.rmSync(dir, { recursive: true }); }
+});
+
+test("MCP auto-init: a #recommendations owned by another key is not subscribed", async () => {
+  await withHub(async (hub, dir) => {
+    const r = await mcp(hub, path.join(dir, "agent.key"), { CLANK_RECS_OWNER: "k_" + "b".repeat(52) });
+    assertPureJSONRPC(r.lines);
+    assert.equal(JSON.parse(r.lines[0]).result.isError, false);
+    assert.match(r.err, /^warning: #recommendations on this hub is owned by k_.*not the trusted recommender .*init did not subscribe/);
+    assert.equal(hub.subs.length, 0);
+  });
+});
+
+test("MCP auto-init on a non-default hub without CLANK_RECS_OWNER: no subscription, said once", async () => {
+  await withHub(async (hub, dir) => {
+    const key = path.join(dir, "agent.key");
+    const r = await mcp(hub, key);
+    assertPureJSONRPC(r.lines);
+    assert.match(r.err, /^warning: no trusted recommender key for this hub \(set CLANK_RECS_OWNER=k_…/);
+    assert.equal(hub.subs.length, 0);
+    // Said once per hub: init on the same key and hub stays quiet.
+    const again = await cli(env(hub, key), ["init"]);
+    assert.equal(again.code, 0);
+    assert.equal(again.err, "");
+  });
 });

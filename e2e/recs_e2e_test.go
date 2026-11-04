@@ -7,6 +7,7 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,15 +28,17 @@ func buildRecommender(t *testing.T) string {
 }
 
 type bot struct {
-	t             *testing.T
-	bin, hub, dir string
+	t                 *testing.T
+	bin, hub, dir, id string
 }
 
 func newBot(t *testing.T, h *testHub) *bot {
 	b := &bot{t: t, bin: buildRecommender(t), hub: h.URL, dir: t.TempDir()}
-	if out, err := exec.Command(b.bin, "-genkey", filepath.Join(b.dir, "bot.key")).CombinedOutput(); err != nil {
+	out, err := exec.Command(b.bin, "-genkey", filepath.Join(b.dir, "bot.key")).CombinedOutput()
+	if err != nil {
 		t.Fatalf("genkey: %v %s", err, out)
 	}
+	b.id = strings.TrimSpace(string(out))
 	return b
 }
 
@@ -56,8 +59,10 @@ func (b *bot) run(args ...string) (string, int) {
 	return out.String(), code
 }
 
-// recsAgent is an agent whose init does subscribe (no CLANK_NO_RECS).
-func recsAgent(t *testing.T, h *testHub) *agent {
+// recsAgent is an agent whose init does subscribe (no CLANK_NO_RECS) and
+// that trusts owner as the recommender key (CLANK_RECS_OWNER; the test hub
+// is not the default hub, so nothing is pinned for it). owner "" sets none.
+func recsAgent(t *testing.T, h *testHub, owner string) *agent {
 	a := newAgent(t, h)
 	var env []string
 	for _, e := range a.env {
@@ -65,19 +70,30 @@ func recsAgent(t *testing.T, h *testHub) *agent {
 			env = append(env, e)
 		}
 	}
+	if owner != "" {
+		env = append(env, "CLANK_RECS_OWNER="+owner)
+	}
 	a.env = env
 	return a
+}
+
+// channelBy creates a channel with its own fresh owner (the recommender
+// takes one channel per owner key per run).
+func channelBy(t *testing.T, h *testHub, args ...string) *agent {
+	t.Helper()
+	o := newAgent(t, h)
+	o.ok("init")
+	o.ok(append([]string{"create"}, args...)...)
+	return o
 }
 
 func subsOf(t *testing.T, a *agent) string { t.Helper(); return a.ok("sub") }
 
 func TestRecommendationsEndToEnd(t *testing.T) {
 	h := startHub(t)
-	owner := newAgent(t, h)
-	owner.ok("init")
-	owner.ok("create", "kite-making", "--title", "Kite making", "--about", "Frames, sails and string.", "--tag", "kites", "--tag", "wind")
-	owner.ok("create", "poker-night", "--title", "Poker night", "--about", "Texas hold'em strategy.", "--tag", "cards")
-	owner.ok("create", "rust-gamedev", "--title", "Rust game dev", "--about", "Engines and ECS.", "--tag", "rust", "--tag", "gamedev")
+	owner := channelBy(t, h, "kite-making", "--title", "Kite making", "--about", "Frames, sails and string.", "--tag", "kites", "--tag", "wind")
+	channelBy(t, h, "poker-night", "--title", "Poker night", "--about", "Texas hold'em strategy.", "--tag", "cards")
+	channelBy(t, h, "rust-gamedev", "--title", "Rust game dev", "--about", "Engines and ECS.", "--tag", "rust", "--tag", "gamedev")
 
 	// The bot: without -ensure-channel on a hub lacking the channel, it fails.
 	b := newBot(t, h)
@@ -111,7 +127,7 @@ func TestRecommendationsEndToEnd(t *testing.T) {
 	owner.fails("E_FORBIDDEN", "only the owner may post in #recommendations", "post", "#recommendations", "clanksquare-rec/1\nchannel: #poker-night")
 
 	// A fresh agent: init subscribes, once.
-	a := recsAgent(t, h)
+	a := recsAgent(t, h, b.id)
 	r := a.run("init")
 	if r.code != 0 || !keyLine.MatchString(r.out) || !strings.HasPrefix(r.err, "subscribed to #recommendations: ") {
 		t.Fatalf("init: exit %d out %q err %q", r.code, r.out, r.err)
@@ -164,7 +180,7 @@ func TestRecommendationsEndToEnd(t *testing.T) {
 	}
 
 	// --no-recs: not subscribed, and quiet.
-	n := recsAgent(t, h)
+	n := recsAgent(t, h, b.id)
 	if out := n.ok("init", "--no-recs"); !keyLine.MatchString(out) {
 		t.Fatalf("init --no-recs: %q", out)
 	}
@@ -181,10 +197,8 @@ func TestRecommendationsEndToEnd(t *testing.T) {
 // to the channel list.
 func TestInitOnAHubWithoutRecommendations(t *testing.T) {
 	h := startHub(t)
-	owner := newAgent(t, h)
-	owner.ok("init")
-	owner.ok("create", "tide-tables", "--title", "Tide tables", "--tag", "ocean")
-	a := recsAgent(t, h)
+	channelBy(t, h, "tide-tables", "--title", "Tide tables", "--tag", "ocean")
+	a := recsAgent(t, h, "k_"+strings.Repeat("a", 52))
 	r := a.run("init")
 	if r.code != 0 || !keyLine.MatchString(r.out) || r.err != "warning: no #recommendations channel on this hub, so init did not subscribe to it; node clank.mjs recs ranks the channel list instead\n" {
 		t.Fatalf("init: exit %d out %q err %q", r.code, r.out, r.err)
@@ -227,7 +241,7 @@ func TestMCPOnboardingSubscribes(t *testing.T) {
 	if out, code := b.run("-ensure-channel"); code != 0 {
 		t.Fatalf("recommender: %s", out)
 	}
-	a := recsAgent(t, h)
+	a := recsAgent(t, h, b.id)
 	p := startMCP(t, a)
 	if got := toolText(t, p.call("tools/call", map[string]any{"name": "clank_whoami", "arguments": map[string]any{}}), false); !strings.HasPrefix(got, "key=k_") {
 		t.Fatalf("clank_whoami: %q", got)
@@ -237,5 +251,98 @@ func TestMCPOnboardingSubscribes(t *testing.T) {
 	}
 	if got := subsOf(t, a); !strings.HasPrefix(got, "#recommendations c_") || strings.Count(got, "\n") != 1 {
 		t.Fatalf("an agent onboarded via MCP is not subscribed once to #recommendations: %q", got)
+	}
+}
+
+// The trust root on the reference hub, under the default hub's name: a
+// squatter owns #recommendations and posts a well-formed rec. A fresh agent
+// (the pinned key applies, CLANK_RECS_OWNER unset) is not subscribed, and
+// recs shows the channel list, not the squatter's recs.
+func TestSquattedRecommendationsAreIgnored(t *testing.T) {
+	const name = "clankmail.zacx.dev"
+	h := startHubNamed(t, name)
+	named := func(a *agent) *agent {
+		for i, e := range a.env {
+			if strings.HasPrefix(e, "CLANK_HUB_NAME=") {
+				a.env[i] = "CLANK_HUB_NAME=" + name
+			}
+		}
+		return a
+	}
+	sq := named(newAgent(t, h))
+	sq.ok("init")
+	sq.ok("create", "recommendations", "--title", "Recommendations", "--post", "owner")
+	victim := named(newAgent(t, h))
+	victim.ok("init")
+	victim.ok("create", "scam-coins", "--title", "Scam coins", "--tag", "kites")
+	var listed struct{ Channel string }
+	if err := json.Unmarshal([]byte(victim.ok("channels", "scam", "--json")), &listed); err != nil || listed.Channel == "" {
+		t.Fatalf("channel id of #scam-coins: %v", err)
+	}
+	sq.ok("post", "#recommendations", "clanksquare-rec/1\nchannel: #scam-coins\nid: "+listed.Channel+"\nreason: new\ntags: kites\ntitle: Totally legit kites\nabout:")
+	a := named(recsAgent(t, h, ""))
+	r := a.run("init")
+	if r.code != 0 || !keyLine.MatchString(r.out) || !strings.HasPrefix(r.err, "warning: #recommendations on this hub is owned by k_") || !strings.Contains(r.err, "init did not subscribe") {
+		t.Fatalf("init on a squatted hub: exit %d out %q err %q", r.code, r.out, r.err)
+	}
+	if got := subsOf(t, a); !strings.HasPrefix(got, "no subscriptions") {
+		t.Fatalf("subscribed to a squatted #recommendations: %q", got)
+	}
+	a.ok("interests", "set", "--topics", "kites")
+	rr := a.run("recs")
+	if rr.code != 0 || strings.Contains(rr.out, "Totally legit") || !strings.Contains(rr.out, "source: the channel list (#recommendations is not the trusted recommender's)") ||
+		!strings.Contains(rr.err, "not the trusted recommender k_7w7g…corq: its posts are ignored") {
+		t.Fatalf("recs on a squatted hub: out %q err %q", rr.out, rr.err)
+	}
+}
+
+// A non-default hub with no CLANK_RECS_OWNER: init does not subscribe even
+// to a real recommender's channel, and says so once.
+func TestUntrustedHubIsNotSubscribed(t *testing.T) {
+	h := startHub(t)
+	b := newBot(t, h)
+	if out, code := b.run("-ensure-channel"); code != 0 {
+		t.Fatalf("recommender: %s", out)
+	}
+	a := recsAgent(t, h, "")
+	r := a.run("init")
+	if r.code != 0 || !strings.HasPrefix(r.err, "warning: no trusted recommender key for this hub (set CLANK_RECS_OWNER=k_…") {
+		t.Fatalf("init: exit %d err %q", r.code, r.err)
+	}
+	if again := a.run("init"); again.err != "" {
+		t.Fatalf("second init repeated the notice: %q", again.err)
+	}
+	if got := subsOf(t, a); !strings.HasPrefix(got, "no subscriptions") {
+		t.Fatalf("subscribed without a trusted key: %q", got)
+	}
+}
+
+// The channel-list fallback: channels you created are hidden, smoke
+// channels are left out, and beyond the 10 newest only channels with a post
+// this week are listed.
+func TestFallbackRecsFilters(t *testing.T) {
+	h := startHub(t)
+	a := recsAgent(t, h, "k_"+strings.Repeat("a", 52)) // no #recommendations here
+	a.run("init")
+	c := newAgent(t, h)
+	c.ok("init")
+	// The oldest: quiet, then pushed out of the 10 newest by 10 more.
+	c.ok("create", "quiet-old", "--title", "Quiet old")
+	c.ok("create", "busy-old", "--title", "Busy old")
+	c.ok("post", "#busy-old", "hello")
+	for i := 0; i < 10; i++ {
+		c.ok("create", fmt.Sprintf("filler-%02d", i), "--title", fmt.Sprintf("Filler %d", i))
+	}
+	c.ok("create", "smoke-left", "--title", "Smoke", "--tag", "smoke")
+	// Newest of all, so only the created-channel rule can hide it.
+	a.ok("create", "my-own-room", "--title", "My own room", "--tag", "bees")
+	got := a.ok("recs", "--limit", "50")
+	for _, gone := range []string{"#my-own-room", "#smoke-left", "#quiet-old"} {
+		if strings.Contains(got, gone+" ") {
+			t.Errorf("recs lists %s:\n%s", gone, got)
+		}
+	}
+	if !strings.Contains(got, "#busy-old [active]") || !strings.Contains(got, "#filler-09 [new]") {
+		t.Fatalf("control: recs should list busy-old (active) and filler-09 (new):\n%s", got)
 	}
 }

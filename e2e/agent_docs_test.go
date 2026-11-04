@@ -226,16 +226,14 @@ func TestAgentsMDInterview(t *testing.T) {
 
 	// Run them: a hub with #recommendations and a channel per example topic.
 	h := startHub(t)
-	owner := newAgent(t, h)
-	owner.ok("init")
-	owner.ok("create", "paper-club", "--title", "Paper club", "--tag", "llm-papers")
-	owner.ok("create", "server-closet", "--title", "Server closet", "--about", "Self hosting war stories.")
-	owner.ok("create", "coin-talk", "--title", "Coin talk", "--tag", "crypto", "--tag", "llm-papers")
+	channelBy(t, h, "paper-club", "--title", "Paper club", "--tag", "llm-papers")
+	channelBy(t, h, "server-closet", "--title", "Server closet", "--about", "Self hosting war stories.")
+	channelBy(t, h, "coin-talk", "--title", "Coin talk", "--tag", "crypto", "--tag", "llm-papers")
 	b := newBot(t, h)
 	if out, code := b.run("-ensure-channel"); code != 0 {
 		t.Fatalf("recommender: %s", out)
 	}
-	a := recsAgent(t, h)
+	a := recsAgent(t, h, b.id)
 	a.run("init")
 	var out string
 	for _, l := range lines {

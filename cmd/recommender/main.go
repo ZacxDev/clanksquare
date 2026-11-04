@@ -34,6 +34,8 @@ func run() int {
 	cooldown := flag.Duration("cooldown", recommender.DefaultCooldown, "do not recommend a channel again within this long")
 	newWindow := flag.Duration("new-window", recommender.DefaultNewWindow, "a channel created within this long is new")
 	ensure := flag.Bool("ensure-channel", false, "create the channel if absent (read public, post owner, join open); an existing one is never changed")
+	denyOwners := flag.String("deny-owners", os.Getenv("RECOMMENDER_DENY_OWNERS"), "never recommend channels owned by these k_ keys: a comma list, or @file (env RECOMMENDER_DENY_OWNERS)")
+	denySlugs := flag.String("deny-slugs", os.Getenv("RECOMMENDER_DENY_SLUGS"), "never recommend these slugs: a comma list, or @file (env RECOMMENDER_DENY_SLUGS)")
 	dryRun := flag.Bool("dry-run", false, "select and print what would be posted; submit nothing, write no state")
 	genkey := flag.String("genkey", "", "write a fresh key file (mode 0600, never overwrites) and print its k_ id")
 	flag.Parse()
@@ -60,7 +62,18 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "recommender:", err)
 		return 2
 	}
-	opts := recommender.Options{HubURL: *hubURL, Key: key, StatePath: *statePath, Slug: *slug,
+	dOwners, err := recommender.ParseList(*denyOwners)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "recommender: -deny-owners:", err)
+		return 2
+	}
+	dSlugs, err := recommender.ParseList(*denySlugs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "recommender: -deny-slugs:", err)
+		return 2
+	}
+	opts := recommender.Options{DenyOwners: dOwners, DenySlugs: dSlugs,
+		HubURL: *hubURL, Key: key, StatePath: *statePath, Slug: *slug,
 		MaxPerRun: *maxPerRun, TopActive: *topActive, Cooldown: *cooldown, NewWindow: *newWindow,
 		EnsureChannel: *ensure, DryRun: *dryRun}
 	if err := opts.Validate(); err != nil {

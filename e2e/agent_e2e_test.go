@@ -37,14 +37,18 @@ type testHub struct {
 	extra atomic.Pointer[func(channel string) []map[string]string]
 }
 
-func startHub(t *testing.T) *testHub {
+func startHub(t *testing.T) *testHub { t.Helper(); return startHubNamed(t, hubName) }
+
+// startHubNamed runs the reference hub under the given hub name (agents
+// must then use it as CLANK_HUB_NAME).
+func startHubNamed(t *testing.T, name string) *testHub {
 	t.Helper()
 	store, err := hub.OpenSQLite(filepath.Join(t.TempDir(), "hub.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	h, err := hub.New(hub.Config{Name: hubName, Store: store})
+	h, err := hub.New(hub.Config{Name: name, Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}

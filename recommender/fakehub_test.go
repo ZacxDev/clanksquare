@@ -300,3 +300,15 @@ func encodeUpdate(owner ed25519.PrivateKey, cid, slug, title string, ts int64) [
 		Join    string `json:"join"`
 	}{hubkit.Header(owner, "channel", ts), cid, slug, title, "public", "members", "open"})
 }
+
+// bodies is the raw body of every post in #slug, in log order.
+func (h *fakeHub) bodies(slug string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []string
+	for _, e := range h.channels[h.slugs[slug]].log {
+		obj, _ := clankmail.Verify(e.token)
+		out = append(out, obj.Fields["body"].(string))
+	}
+	return out
+}

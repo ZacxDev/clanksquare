@@ -9,7 +9,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   normalizeTag, parseTopicList, mergeInterests, validInterests, parseRecBody, recsFromPosts,
-  rankRecs, matchOf, autoSubscribe, FORMAT_LINE, RECS_SLUG,
+  rankRecs, matchOf, autoSubscribe, FORMAT_LINE, RECS_SLUG, feedRecs, trustedRecsOwner,
+  PINNED_RECS_OWNER, DEFAULT_RECS_HUB_NAME,
 } from "../src/recs.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -203,9 +204,9 @@ test("without --all, recs matching no topic are left out; --all appends them", (
 
 // ── init's auto-subscription ─────────────────────────────────────
 
-function deps({ absent = false, failSubs = false, live = [] } = {}) {
+function deps({ absent = false, failSubs = false, live = [], chOwner = OWNER } = {}) {
   const calls = [];
-  const ch = { id: cid("n"), slug: RECS_SLUG };
+  const ch = { id: cid("n"), slug: RECS_SLUG, owner: chOwner };
   return {
     calls,
     resolve: async () => { calls.push("resolve"); if (absent) throw { code: "E_NOT_FOUND" }; return ch; },
@@ -213,36 +214,77 @@ function deps({ absent = false, failSubs = false, live = [] } = {}) {
     subscribe: async c => { calls.push("subscribe " + c.id); },
   };
 }
+const T = { owner: OWNER };
 
 test("init subscribes to #recommendations by default", async () => {
   const d = deps();
-  assert.equal((await autoSubscribe({}, d)).status, "subscribed");
+  assert.equal((await autoSubscribe({ ...T }, d)).status, "subscribed");
   assert.deepEqual(d.calls, ["resolve", "subs", "subscribe " + cid("n")]);
 });
 
 test("--no-recs: no hub call at all", async () => {
   const d = deps();
-  assert.equal((await autoSubscribe({ noRecs: true }, d)).status, "off");
+  assert.equal((await autoSubscribe({ ...T, noRecs: true }, d)).status, "off");
   assert.deepEqual(d.calls, []);
 });
 
 test("a hub without the channel: absent, init goes on", async () => {
   const d = deps({ absent: true });
-  assert.equal((await autoSubscribe({}, d)).status, "absent");
+  assert.equal((await autoSubscribe({ ...T }, d)).status, "absent");
   assert.deepEqual(d.calls, ["resolve"]);
 });
 
 test("re-run: no second subscription (done, or already live)", async () => {
   const done = deps();
-  assert.equal((await autoSubscribe({ done: true }, done)).status, "done");
+  assert.equal((await autoSubscribe({ ...T, done: true }, done)).status, "done");
   assert.deepEqual(done.calls, []);
   const live = deps({ live: [{ channel: cid("n") }] });
-  assert.equal((await autoSubscribe({}, live)).status, "already");
+  assert.equal((await autoSubscribe({ ...T }, live)).status, "already");
   assert.ok(!live.calls.some(c => c.startsWith("subscribe")));
 });
 
 test("a failure is reported, never thrown", async () => {
-  const r = await autoSubscribe({}, deps({ failSubs: true }));
+  const r = await autoSubscribe({ ...T }, deps({ failSubs: true }));
   assert.equal(r.status, "error");
   assert.equal(r.error.code, "E_NET");
+});
+
+// ── the trust root ───────────────────────────────────────────────
+
+test("the default hub pins the recommender key; other hubs need CLANK_RECS_OWNER", () => {
+  assert.equal(DEFAULT_RECS_HUB_NAME, "clankmail.zacx.dev");
+  assert.equal(PINNED_RECS_OWNER, "k_7w7gwci2pnngidx3drdqlrveb32yxckf5tq7v2gtno52hqkocorq");
+  assert.deepEqual(trustedRecsOwner("clankmail.zacx.dev", {}), { owner: PINNED_RECS_OWNER, source: "pinned" });
+  assert.deepEqual(trustedRecsOwner("hub.example", {}), { owner: null, reason: "unset" });
+  assert.deepEqual(trustedRecsOwner("hub.example", { CLANK_RECS_OWNER: MALLORY }), { owner: MALLORY, source: "CLANK_RECS_OWNER" });
+  assert.deepEqual(trustedRecsOwner("hub.example", { CLANK_RECS_OWNER: "k_short" }), { owner: null, reason: "bad" });
+  assert.deepEqual(trustedRecsOwner("hub.example", { CLANK_RECS_OWNER: "" }), { owner: null, reason: "unset" });
+});
+
+test("feed: the trusted owner's channel is read; a squatted one yields nothing", () => {
+  const ours = { owner: OWNER }, squatted = { owner: MALLORY };
+  // The squatter's channel, holding a rec signed by the trusted key itself:
+  // still nothing, because the channel is not the trusted key's.
+  const posts = [post(REC_KITES, OWNER)];
+  assert.deepEqual(feedRecs(ours, posts, OWNER).recs.map(r => r.slug), ["kite-making"], "control: the trusted owner's channel is read");
+  const r = feedRecs(squatted, posts, OWNER);
+  assert.equal(r.status, "squatted");
+  assert.equal(r.recs.length, 0);
+  // And in the trusted channel, a rec signed by anyone else is ignored.
+  assert.equal(feedRecs(ours, [post(REC_RUST, MALLORY)], OWNER).recs.length, 0);
+  assert.equal(feedRecs(ours, posts, null).status, "untrusted");
+});
+
+test("auto-sub: never to a squatted #recommendations", async () => {
+  const d = deps({ chOwner: MALLORY });
+  assert.equal((await autoSubscribe({ ...T }, d)).status, "squatted");
+  assert.deepEqual(d.calls, ["resolve"]);
+});
+
+test("auto-sub: no trusted key (a non-default hub without CLANK_RECS_OWNER): no hub call", async () => {
+  const d = deps();
+  assert.equal((await autoSubscribe({ owner: trustedRecsOwner("hub.example", {}).owner }, d)).status, "untrusted");
+  assert.deepEqual(d.calls, []);
+  const withEnv = deps({ chOwner: MALLORY });
+  assert.equal((await autoSubscribe({ owner: trustedRecsOwner("hub.example", { CLANK_RECS_OWNER: MALLORY }).owner }, withEnv)).status, "subscribed", "CLANK_RECS_OWNER names the trusted key");
 });

@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/ZacxDev/clanksquare/internal/hubkit"
 )
 
 // State is a cache of what the curator has posted. The channel log is the
@@ -76,39 +77,5 @@ func (s *State) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".curator-state-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			os.Remove(name)
-		}
-	}()
-	if _, err := tmp.Write(append(raw, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(name, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	ok = true
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
-	}
-	return nil
+	return hubkit.WriteFileAtomic(path, append(raw, '\n'))
 }

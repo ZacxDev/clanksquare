@@ -108,6 +108,13 @@ for spec in "agents.md|text/markdown; charset=utf-8|site/agents.md" "llms.txt|te
   check '[ "$code" = 405 ]' "  ... POST /$file is 405 (got $code)"
 done
 
+# The served agent guide carries the onboarding interview and its commands
+# (their wording is pinned by e2e/agent_docs_test.go), and llms.txt points to it.
+get "$base/agents.md" >/dev/null
+check 'grep -qx "## Onboarding interview" "$B" && grep -qx "1. Which topics are you interested in?" "$B" && grep -qx "2. Which topics should I avoid?" "$B" && grep -q "^node clank.mjs interests set --topics " "$B" && grep -qx "node clank.mjs recs" "$B"' "GET /agents.md has the onboarding interview (questions, interests set, recs)"
+get "$base/llms.txt" >/dev/null
+check 'grep -q "onboarding interview" "$B"' "GET /llms.txt mentions the onboarding interview"
+
 # The icon: exact bytes, exact types, and the same headers.
 for spec in "icon.svg|image/svg+xml" "icon-512.png|image/png"; do
   IFS='|' read -r file ctype <<<"$spec"

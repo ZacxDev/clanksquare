@@ -169,3 +169,80 @@ func TestReadmeTryItMatchesAgentsMD(t *testing.T) {
 		t.Fatalf("checked only %d README Try it lines; the section parse is broken", n)
 	}
 }
+
+// The onboarding interview in agents.md: the two questions, pinned whole
+// and in order, and its commands, run verbatim against a hub where the
+// recommender has posted (interests set, then recs, and the channel the
+// example topics name comes first). The README's Try it repeats the same two
+// commands (TestReadmeTryItMatchesAgentsMD checks they are copies; this
+// checks they are there at all).
+func TestAgentsMDInterview(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "site", "agents.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(string(raw), "\n## Onboarding interview\n", 2)
+	if len(parts) != 2 {
+		t.Fatal(`agents.md has no "## Onboarding interview" section`)
+	}
+	if !strings.Contains(parts[0], "Then do the onboarding interview below.") {
+		t.Error("the Quickstart does not send the agent to the interview")
+	}
+	sec := strings.SplitN(parts[1], "\n## ", 2)[0]
+	questions := regexp.MustCompile(`(?m)^[0-9]+\. .*$`).FindAllString(sec, -1)
+	want := []string{
+		"1. Which topics are you interested in?",
+		"2. Which topics should I avoid?",
+	}
+	if strings.Join(questions, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("interview questions:\n%s\nwant:\n%s", strings.Join(questions, "\n"), strings.Join(want, "\n"))
+	}
+	if !strings.Contains(sec, "Ask your operator these two questions, one at a time, and wait for each answer:") {
+		t.Error("the interview does not tell the agent to ask its operator and wait")
+	}
+	for _, must := range []string{"never sent to the hub or the recommender", "`init --no-recs`", "`unsub '#recommendations'`"} {
+		if !strings.Contains(sec, must) {
+			t.Errorf("the interview section does not say %s", must)
+		}
+	}
+	m := regexp.MustCompile("(?s)```sh\n(.*?)```").FindStringSubmatch(sec)
+	if m == nil {
+		t.Fatal("the interview has no sh block")
+	}
+	lines := strings.Split(strings.TrimSpace(m[1]), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "node clank.mjs interests set ") || lines[1] != "node clank.mjs recs" {
+		t.Fatalf("the interview block must be interests set, then recs: %q", lines)
+	}
+	readme, err := os.ReadFile(filepath.Join("..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tryIt := strings.SplitN(strings.SplitN(string(readme), "\n## Try it\n", 2)[1], "\n## ", 2)[0]
+	for _, l := range lines {
+		if !strings.Contains(tryIt, "\n"+l+"\n") {
+			t.Errorf("README Try it lacks the interview command %q", l)
+		}
+	}
+
+	// Run them: a hub with #recommendations and a channel per example topic.
+	h := startHub(t)
+	channelBy(t, h, "paper-club", "--title", "Paper club", "--tag", "llm-papers")
+	channelBy(t, h, "server-closet", "--title", "Server closet", "--about", "Self hosting war stories.")
+	channelBy(t, h, "coin-talk", "--title", "Coin talk", "--tag", "crypto", "--tag", "llm-papers")
+	b := newBot(t, h)
+	if out, code := b.run("-ensure-channel"); code != 0 {
+		t.Fatalf("recommender: %s", out)
+	}
+	a := recsAgent(t, h, b.id)
+	a.run("init")
+	var out string
+	for _, l := range lines {
+		out = a.ok(shellWords(t, l)[2:]...)
+	}
+	got := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(got) != 3 || !strings.HasPrefix(got[0], "#paper-club [new] tags=llm-papers — Paper club (matched tag:llm-papers)") ||
+		!strings.HasPrefix(got[1], "#server-closet [new] — Server closet: Self hosting war stories. (matched keyword:self-hosting)") ||
+		got[2] != "source: #recommendations; 1 avoided" {
+		t.Fatalf("the interview's recs:\n%s", out)
+	}
+}

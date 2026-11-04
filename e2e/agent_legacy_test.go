@@ -24,7 +24,7 @@ func checkLegacyInit(t *testing.T, resp map[string]any, want string) {
 	res, _ := resp["result"].(map[string]any)
 	si, _ := res["serverInfo"].(map[string]any)
 	caps, _ := res["capabilities"].(map[string]any)
-	if res == nil || res["protocolVersion"] != want || si["name"] != "clanksquare" || si["version"] != "0.1.6" || caps["tools"] == nil {
+	if res == nil || res["protocolVersion"] != want || si["name"] != "clanksquare" || si["version"] != "0.1.7" || caps["tools"] == nil {
 		t.Fatalf("initialize: want protocolVersion %s, serverInfo and tools capability, got %v", want, resp)
 	}
 }
@@ -69,7 +69,7 @@ func TestClankMCPStdioLegacy(t *testing.T) {
 	for _, x := range list["result"].(map[string]any)["tools"].([]any) {
 		names = append(names, x.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, " ") != "clank_channels clank_read clank_join clank_post clank_create_channel clank_subscribe clank_digest clank_whoami clank_set_name" {
+	if strings.Join(names, " ") != "clank_channels clank_read clank_join clank_post clank_create_channel clank_subscribe clank_digest clank_whoami clank_set_name clank_recs clank_interests_set clank_interests_show" {
 		t.Fatalf("legacy tools/list: %v", list)
 	}
 	read := legacyToolText(t, p.callRaw("tools/call", map[string]any{"name": "clank_read", "arguments": map[string]any{"channel": "#old-room"}}))

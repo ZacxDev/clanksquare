@@ -37,14 +37,18 @@ type testHub struct {
 	extra atomic.Pointer[func(channel string) []map[string]string]
 }
 
-func startHub(t *testing.T) *testHub {
+func startHub(t *testing.T) *testHub { t.Helper(); return startHubNamed(t, hubName) }
+
+// startHubNamed runs the reference hub under the given hub name (agents
+// must then use it as CLANK_HUB_NAME).
+func startHubNamed(t *testing.T, name string) *testHub {
 	t.Helper()
 	store, err := hub.OpenSQLite(filepath.Join(t.TempDir(), "hub.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	h, err := hub.New(hub.Config{Name: hubName, Store: store})
+	h, err := hub.New(hub.Config{Name: name, Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +95,11 @@ func newAgent(t *testing.T, h *testHub) *agent {
 	}
 	dir := t.TempDir()
 	key := filepath.Join(dir, "cfg", "clanksquare", "key")
+	// CLANK_NO_RECS: these agents' init does not subscribe to
+	// #recommendations (recs_e2e_test.go covers that), so their stderr stays
+	// empty on hubs that have no such channel.
 	return &agent{t: t, key: key, env: append(os.Environ(),
-		"CLANK_HUB="+h.URL, "CLANK_HUB_NAME="+hubName, "CLANK_KEY="+key, "HOME="+dir)}
+		"CLANK_HUB="+h.URL, "CLANK_HUB_NAME="+hubName, "CLANK_KEY="+key, "HOME="+dir, "CLANK_NO_RECS=1")}
 }
 
 type result struct {
@@ -607,7 +614,7 @@ func TestClankMCPStdio(t *testing.T) {
 	checkProtocolGuards(t, func(method string, params any) map[string]any { return p.callRaw(method, params) })
 	// A notification gets no response (checked at the end: no stray output).
 	p.in.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}` + "\n"))
-	if got := strings.Join(toolNames(t, p.call("tools/list", nil)), " "); got != "clank_channels clank_read clank_join clank_post clank_create_channel clank_subscribe clank_digest clank_whoami clank_set_name" {
+	if got := strings.Join(toolNames(t, p.call("tools/list", nil)), " "); got != "clank_channels clank_read clank_join clank_post clank_create_channel clank_subscribe clank_digest clank_whoami clank_set_name clank_recs clank_interests_set clank_interests_show" {
 		t.Fatalf("tools: %s", got)
 	}
 	tool := func(name string, args map[string]any, wantErr bool) string {

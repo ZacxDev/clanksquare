@@ -7,7 +7,6 @@ package curator
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ZacxDev/clankmail/go/clankmail"
+	"github.com/ZacxDev/clanksquare/internal/hubkit"
 )
 
 // Version is reported in the User-Agent.
@@ -96,7 +96,7 @@ func (r *Result) ExitCode() int {
 
 type runner struct {
 	Options
-	hub     hubClient
+	hub     hubkit.Client
 	me      string
 	state   *State
 	res     *Result
@@ -132,7 +132,7 @@ func Run(ctx context.Context, opts Options) *Result {
 		opts.Out = os.Stdout
 	}
 	r := &runner{Options: opts, res: &Result{}, blocked: map[string]bool{}, tried: map[string]bool{}}
-	r.hub = hubClient{base: opts.Config.HubURL, client: opts.Client}
+	r.hub = hubkit.Client{Base: opts.Config.HubURL, HTTP: opts.Client, UserAgent: UserAgent}
 	r.me = clankmail.KeyID(opts.Key.Public().(ed25519.PublicKey))
 	r.logf("INFO", "curator %s key=%s hub=%s dry_run=%v", Version, r.me, opts.Config.HubURL, opts.DryRun)
 
@@ -140,9 +140,9 @@ func Run(ctx context.Context, opts Options) *Result {
 	// file there is nothing to lock: overlapping runs must then be
 	// prevented by the schedule.
 	if opts.StatePath != "" && !opts.DryRun {
-		unlock, err := lockState(opts.StatePath)
+		unlock, err := hubkit.Lock(opts.StatePath)
 		if err != nil {
-			if errors.Is(err, errLocked) {
+			if errors.Is(err, hubkit.ErrLocked) {
 				r.fail("another curator run holds %s.lock: posting nothing", opts.StatePath)
 			} else {
 				r.fail("cannot lock %s.lock (%v): posting nothing", opts.StatePath, err)
@@ -252,14 +252,14 @@ var notStoredCodes = map[string]int{"E_STALE": http.StatusBadRequest, "E_NOT_FOU
 // does not).
 func (r *runner) send(ctx context.Context, what, token string) (outcome, error) {
 	want := tokenID(token)
-	id, err := r.hub.submit(ctx, token)
+	id, err := r.hub.Submit(ctx, token)
 	if err == nil {
 		if id != want {
 			return unknown, fmt.Errorf("%w: hub returned id %s, want %s", errWrongID, id, want)
 		}
 		return confirmed, nil
 	}
-	if he, ok := err.(*HubError); ok {
+	if he, ok := err.(*hubkit.Error); ok {
 		switch {
 		case he.Status == http.StatusTooManyRequests:
 			if !r.stopped {
@@ -280,17 +280,7 @@ func (r *runner) send(ctx context.Context, what, token string) (outcome, error) 
 var errWrongID = errors.New("wrong id")
 
 // tokenID is the m_ id of one of our own tokens.
-func tokenID(token string) string {
-	parts := strings.Split(token, ".")
-	if len(parts) != 4 {
-		return ""
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return ""
-	}
-	return clankmail.ObjectID(payload)
-}
+func tokenID(token string) string { return hubkit.TokenID(token) }
 
 // submit signs and submits a handle or channel object. These are not
 // tracked as pending: a duplicate of either is refused or harmless (a slug
@@ -302,7 +292,7 @@ func (r *runner) submit(ctx context.Context, what string, payload []byte) (strin
 	switch {
 	case out == confirmed:
 		return tokenID(token), true
-	case out == unknown && !r.res.RateLimited && !errors.Is(err, errWrongID) && r.hub.stored(ctx, tokenID(token), token):
+	case out == unknown && !r.res.RateLimited && !errors.Is(err, errWrongID) && r.hub.Stored(ctx, tokenID(token), token):
 		r.logf("INFO", "%s: submit errored (%v) but the hub holds it", what, err)
 		return tokenID(token), true
 	case !r.res.RateLimited:
@@ -375,9 +365,9 @@ func (r *runner) ensureHandle(ctx context.Context) {
 	var resp struct {
 		Handle string `json:"handle"`
 	}
-	err := r.hub.get(ctx, "/v1/handles/"+name, &resp)
+	err := r.hub.Get(ctx, "/v1/handles/"+name, &resp)
 	switch {
-	case isCode(err, "E_NOT_FOUND"):
+	case hubkit.IsCode(err, "E_NOT_FOUND"):
 		if r.DryRun {
 			r.logf("DRY-RUN", "would claim handle @%s", name)
 			return
@@ -406,8 +396,8 @@ func (r *runner) ensureHandle(ctx context.Context) {
 // channel as needed. "" with ok=true means a dry run of a channel that does
 // not exist yet.
 func (r *runner) ensureChannel(ctx context.Context, ch *Channel) (string, bool) {
-	resp, err := r.hub.channelBySlug(ctx, ch.Slug)
-	if isCode(err, "E_NOT_FOUND") {
+	resp, err := r.hub.ChannelBySlug(ctx, ch.Slug)
+	if hubkit.IsCode(err, "E_NOT_FOUND") {
 		payload := ch.manifest(r.Key, "", r.nowMS())
 		if r.DryRun {
 			r.logf("DRY-RUN", "channel=%s would create channel", ch.Slug)
@@ -426,18 +416,9 @@ func (r *runner) ensureChannel(ctx context.Context, ch *Channel) (string, bool) 
 		return "", false
 	}
 	// §4: clients MUST verify what the hub serves before trusting it.
-	gen, gerr := clankmail.Verify(resp.Genesis)
-	man, merr := clankmail.Verify(resp.Manifest)
-	switch {
-	case gerr != nil || merr != nil:
-		r.fail("channel=%s hub served an unverifiable manifest (genesis: %v, manifest: %v)", ch.Slug, gerr, merr)
-		return "", false
-	case gen.Type != "channel" || gen.Fields["channel"] != nil || clankmail.ChannelID(gen.Payload) != resp.Channel:
-		r.fail("channel=%s genesis does not match channel id %s", ch.Slug, resp.Channel)
-		return "", false
-	case man.Type != "channel" || man.From != gen.From ||
-		man.ID != gen.ID && man.Fields["channel"] != resp.Channel || man.Fields["slug"] != ch.Slug:
-		r.fail("channel=%s manifest is not a valid manifest of %s", ch.Slug, resp.Channel)
+	gen, man, verr := hubkit.VerifyChannel(resp, ch.Slug)
+	if verr != nil {
+		r.fail("channel=%s hub served a bad channel record: %v", ch.Slug, verr)
 		return "", false
 	}
 	if gen.From != r.me {
@@ -467,7 +448,7 @@ func (r *runner) rebuildSeen(ctx context.Context, channelID string) (map[string]
 	seen := map[string]int64{}
 	ignored := 0
 	// Verified page by page; only the keys are kept.
-	err := r.hub.eachLogPage(ctx, channelID, func(toks []string) {
+	err := r.hub.EachLogPage(ctx, channelID, func(toks []string) {
 		for _, tok := range toks {
 			obj, err := clankmail.Verify(tok)
 			if err != nil || obj.Type != "msg" || obj.From != r.me {

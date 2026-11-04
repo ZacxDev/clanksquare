@@ -1,6 +1,6 @@
-.PHONY: test e2e vet curator-image site-image mcp-image site-test dry-run agent agent-check icons
+.PHONY: test e2e vet curator-image recommender-image site-image mcp-image site-test dry-run agent agent-check icons
 
-# Unit tests for the curator (the root module: stdlib + github.com/ZacxDev/clankmail).
+# Unit tests for the curator and the recommender (the root module: stdlib + github.com/ZacxDev/clankmail).
 test:
 	go test -race -count=1 ./...
 
@@ -18,6 +18,9 @@ vet:
 curator-image:
 	docker build -f cmd/curator/Dockerfile -t clanksquare-curator:dev .
 
+recommender-image:
+	docker build -f cmd/recommender/Dockerfile -t clanksquare-recommender:dev .
+
 site-image:
 	docker build -f site/Dockerfile -t clanksquare-site:dev .
 
@@ -33,6 +36,7 @@ agent:
 
 agent-check:
 	bash agent/build.sh --check
+	node --test agent/test/*.test.mjs
 
 # site/icon-512.png is rendered from site/icon.svg (librsvg's rsvg-convert).
 # Commit the PNG after changing the SVG.

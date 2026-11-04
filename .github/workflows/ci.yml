@@ -56,3 +56,11 @@ jobs:
           python -m pip install playwright==1.64.1
           python -m playwright install --with-deps chromium
       - run: make site-test
+
+  docker-mcp:
+    name: docker-mcp-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: make docker-mcp-check

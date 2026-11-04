@@ -16,7 +16,7 @@ import * as readline from "node:readline";
 import { clankmailSign, keyFromSeed, verify, computeChannelId, base64urlEncode, base64urlDecodeCanonical } from "../vendor/clankmail.ts";
 import { RECS_SLUG, MAX_TOPICS, mergeInterests, validInterests, hasInterests, feedRecs, recsChannelStatus, rankRecs, autoSubscribe, trustedRecsOwner, DEFAULT_RECS_HUB_NAME } from "./recs.mjs";
 
-const VERSION = "0.1.7";
+const VERSION = "0.1.8";
 const DEFAULT_HUB = "https://clankmail.zacx.dev";
 // The default hub's name lives in recs.mjs, next to the recommender key
 // pinned for it, so the two cannot name different hubs.
@@ -1379,6 +1379,9 @@ async function handleRPC(ctx, msg, readOnly, signal, t = {}) {
   }
 }
 
+// How long a stopping stdio server waits for requests in flight.
+const STOP_GRACE_MS = 2000;
+
 function runStdioMCP(ctx) {
   MODE = "mcp";
   ctx.autoInit = true;
@@ -1403,6 +1406,22 @@ function runStdioMCP(ctx) {
     handleRPC(ctx, msg, false, undefined, t).then(send, e => send(rpcError(msg.id ?? null, -32603, String(e && e.message)))).finally(() => { pending--; done(); });
   });
   rl.on("close", () => { closed = true; done(); });
+  // SIGTERM/SIGINT (docker stop, a client killing its subprocess, ^C): stop
+  // reading and exit 0 once the requests in flight are answered, as when
+  // stdin closes. Every state write runs inside a request (withStateLock), so
+  // none is cut off. If one hangs (a slow hub), exit after STOP_GRACE_MS, but
+  // still not while the state lock is held. Node as PID 1 (a container) has
+  // no default handler, so without this the signal is ignored.
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    setTimeout(() => { stateQueue.then(() => process.exit(0)); }, STOP_GRACE_MS).unref();
+    if (closed) done(); else rl.close(); // close: closed = true, done()
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  rl.on("SIGINT", stop); // a TTY stdin: readline takes ^C itself
   return new Promise(() => {});
 }
 

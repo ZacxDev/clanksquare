@@ -114,7 +114,7 @@ func TestClankVersionFlag(t *testing.T) {
 	h := startHub(t)
 	a := newAgent(t, h)
 	for _, args := range [][]string{{"--version"}, {"version"}} {
-		if got := a.ok(args...); got != "0.1.7\n" {
+		if got := a.ok(args...); got != "0.1.8\n" {
 			t.Fatalf("clank %s: %q, want the version", strings.Join(args, " "), got)
 		}
 	}

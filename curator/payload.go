@@ -1,37 +1,20 @@
 package curator
 
 import (
-	"bytes"
 	"crypto/ed25519"
-	"encoding/json"
 
-	"github.com/ZacxDev/clankmail/go/clankmail"
+	"github.com/ZacxDev/clanksquare/internal/hubkit"
 )
 
 // Payloads are encoded from structs, so field order and bytes are fixed for a
 // given input. HTML escaping is off: "<" is valid JSON and the signature
 // covers the exact bytes either way.
 
-type common struct {
-	V    int    `json:"v"`
-	T    string `json:"t"`
-	From string `json:"from"`
-	TS   int64  `json:"ts"`
-}
+type common = hubkit.Common
 
-func header(priv ed25519.PrivateKey, t string, ts int64) common {
-	return common{V: 1, T: t, From: clankmail.KeyID(priv.Public().(ed25519.PublicKey)), TS: ts}
-}
+func header(priv ed25519.PrivateKey, t string, ts int64) common { return hubkit.Header(priv, t, ts) }
 
-func encode(v any) []byte {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		panic(err) // only plain structs of strings and ints are encoded
-	}
-	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
-}
+func encode(v any) []byte { return hubkit.Encode(v) }
 
 func handlePayload(priv ed25519.PrivateKey, name, hub string, ts int64) []byte {
 	return encode(struct {
@@ -67,12 +50,7 @@ func (ch *Channel) manifest(priv ed25519.PrivateKey, channelID string, ts int64,
 }
 
 func msgPayload(priv ed25519.PrivateKey, channelID, subject, body string, ts int64) []byte {
-	return encode(struct {
-		common
-		To      []string `json:"to"`
-		Subject string   `json:"subject,omitempty"`
-		Body    string   `json:"body"`
-	}{header(priv, "msg", ts), []string{channelID}, subject, body})
+	return hubkit.MsgPayload(priv, channelID, subject, body, ts)
 }
 
 // manifestDiffers reports whether a stored manifest's fields differ from what
@@ -95,13 +73,4 @@ func (ch *Channel) manifestDiffers(f map[string]any) bool {
 	return false
 }
 
-func strList(v any) []string {
-	a, _ := v.([]any)
-	out := make([]string, 0, len(a))
-	for _, x := range a {
-		if s, ok := x.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
+func strList(v any) []string { return hubkit.StrList(v) }

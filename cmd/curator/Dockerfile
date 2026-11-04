@@ -11,6 +11,7 @@ FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae538
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+COPY internal ./internal
 COPY curator ./curator
 COPY cmd/curator ./cmd/curator
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/curator ./cmd/curator \

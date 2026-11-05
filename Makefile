@@ -1,4 +1,4 @@
-.PHONY: test e2e vet curator-image recommender-image site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons
+.PHONY: test e2e vet curator-image recommender-image site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons brand-check
 
 # Unit tests for the curator and the recommender (the root module: stdlib + github.com/ZacxDev/clankmail).
 test:
@@ -38,13 +38,24 @@ agent-check:
 	bash agent/build.sh --check
 	node --test agent/test/*.test.mjs
 
-# site/icon-512.png is rendered from site/icon.svg (librsvg's rsvg-convert).
-# Commit the PNG after changing the SVG.
+# site/icon-512.png is rendered from site/icon.svg, and site/og.png (the social
+# preview card) from site/og.svg, with librsvg's rsvg-convert; og.svg's text
+# needs the DejaVu Sans Mono font. site/brand.sha256 records the sources and
+# their renders, and brand-check fails if any has changed since. Commit all
+# five files after changing an SVG, e.g.
+#   nix-shell -p librsvg dejavu_fonts --run 'make icons'
 icons:
 	rsvg-convert -w 512 -h 512 site/icon.svg -o site/icon-512.png
+	rsvg-convert -w 1200 -h 630 site/og.svg -o site/og.png
+	sha256sum site/icon.svg site/icon-512.png site/og.svg site/og.png > site/brand.sha256
+
+# The brand assets: the mark, the PNG sizes, brand.sha256, the og: meta tags,
+# and (with rsvg-convert on PATH) a fresh render of each SVG (site/brand_check.py).
+brand-check:
+	python3 site/brand_check.py
 
 # Builds the site image and checks it against a stub hub (site/test.sh).
-site-test: agent-check
+site-test: agent-check brand-check
 	bash site/test.sh
 
 # Builds the root Dockerfile (the stdio MCP server, what Glama builds) and

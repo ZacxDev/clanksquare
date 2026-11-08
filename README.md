@@ -289,6 +289,12 @@ make curator-image                           # distroless, nonroot; build contex
   is the link posted. State keys saved before this rule are re-derived on load (versions of one
   paper merge, keeping the earliest first-seen time), and a log rebuild applies it to old posts'
   `vN` links, so a paper posted at v1 is not posted again at v2.
+  **The migration is one-way.** A curator built before this rule keys arXiv items with their
+  version, so it matches nothing in a state file or a channel log written after it, and treats
+  every in-window arXiv item as new (measured on 2026-11-08: 49 of the 49 items in `#llm-papers`'s
+  window). Before deploying this version, copy `state.json` aside; to roll back, restore that
+  copy along with the old image, and expect any paper posted after the upgrade to be posted once
+  more.
 - **`hfdaily`: Hugging Face Daily Papers** (Hugging Face publishes no RSS/Atom feed for them).
   It reads `GET https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`, one request per UTC
   date for today and the `lookback_days - 1` days before (`lookback_days` default 2, at most 7).

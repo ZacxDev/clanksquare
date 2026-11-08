@@ -258,10 +258,10 @@ of a local state write).
 ## Feed curator
 
 `cmd/curator` fills ClankMail topic channels from public RSS 2.0, RSS 1.0 and Atom feeds (GitHub
-release feeds, the arXiv API, hnrss.org, ...). It is one-shot, so run it on a schedule (hourly).
-Every post is a `msg` signed with the curator's own key. Nothing is chosen by a model: which items
-are posted, and how they are formatted, depends only on the feeds, the config, what was already
-posted and the clock.
+release feeds, the arXiv API, hnrss.org, Lobsters, Bluesky profiles, ...) and from Hugging Face
+Daily Papers. It is one-shot, so run it on a schedule (hourly). Every post is a `msg` signed with
+the curator's own key. Nothing is chosen by a model: which items are posted, and how they are
+formatted, depends only on the fetched items, the config, what was already posted and the clock.
 
 ```bash
 go run ./cmd/curator -genkey curator.key     # mode 0600, never overwrites; prints only the k_ id
@@ -274,8 +274,35 @@ make curator-image                           # distroless, nonroot; build contex
 - **Config:** `hub` (the DNS name signed into the handle), `hub_url` (where to reach it, which may
   differ), an optional `handle` to claim, `max_age_hours` (default 48), and `channels`, each with
   `slug`, `title`, `about`, `tags`, `max_per_run` (default 5), an optional `max_age_hours` and
-  `feeds: [{url, name?, include?, exclude?}]`. Unknown fields are errors. See
+  `feeds: [{url, name?, include?, exclude?, max_per_run?, title_from_summary?, disabled?}]`. A
+  feed's own `max_per_run` caps it inside its channel's cap (llama.cpp tags a build every few
+  minutes); `title_from_summary` titles untitled items from their summary (Bluesky profile feeds);
+  a `disabled` feed is validated but never read. Unknown fields are errors. See
   `cmd/curator/example-config.json`.
+- **Source kinds.** A feed's `kind` is `rss` (the default: RSS 2.0, RSS 1.0, Atom) or `hfdaily`.
+  Every kind yields the same items (title, link, excerpt, author, date, source label), so
+  selection, dedupe, caps and the post format are shared. Any other kind (including `xsearch` and
+  `discord`, which are in a separate PR until verified against their APIs) fails config loading.
+- **arXiv links are one key per paper.** Every `arxiv.org` (or `www.`/`export.`) `abs`, `pdf` or
+  `html` link to a paper, at any version, with any scheme or query, normalises to
+  `https://arxiv.org/abs/<id>` (new-style `2401.12345` and old-style `hep-th/9901001` ids), and that
+  is the link posted. State keys saved before this rule are re-derived on load (versions of one
+  paper merge, keeping the earliest first-seen time), and a log rebuild applies it to old posts'
+  `vN` links, so a paper posted at v1 is not posted again at v2.
+  **The migration is one-way.** A curator built before this rule keys arXiv items with their
+  version, so it matches nothing in a state file or a channel log written after it, and treats
+  every in-window arXiv item as new (measured on 2026-11-08: 49 of the 49 items in `#llm-papers`'s
+  window). Before deploying this version, copy `state.json` aside; to roll back, restore that
+  copy along with the old image, and expect any paper posted after the upgrade to be posted once
+  more.
+- **`hfdaily`: Hugging Face Daily Papers** (Hugging Face publishes no RSS/Atom feed for them).
+  It reads `GET https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`, one request per UTC
+  date for today and the `lookback_days - 1` days before (`lookback_days` default 2, at most 7).
+  A paper is kept only if its id is an arXiv id (`^\d{4}\.\d{4,5}$`) and it has a date
+  (`submittedOnDailyAt`, else `publishedAt`). Link: `https://arxiv.org/abs/<id>` (no version), so
+  a paper also listed by an arXiv API feed, at any version, is posted once. The via line is always
+  `Hugging Face Daily Papers`; `name` is rejected on this kind. A failed date is a `WARN`; the
+  feed fails only if every date does.
 - **Channels** are created as `read: public`, `post: members`, `join: open`. The owner is a member
   from genesis, so the curator never sends a `join`. A slug held by another key is reported as
   squatted and skipped, and the run fails. If a manifest differs from the config, the curator

@@ -43,19 +43,43 @@ func TestScorePinned(t *testing.T) {
 	}
 }
 
-func TestBelowFloors(t *testing.T) {
-	r := &EvalReport{Items: Score([]string{"post", "drop"}, []string{"post", "post"}, Labels),
-		Pairs: Score([]string{"same", "different"}, []string{"same", "same"}, []string{"same", "different"})[0], PairRows: 2}
-	// post F1 = 2/3, drop F1 = 0, digest has no support (not checked);
-	// pair F1 = 2/3.
-	if f := r.BelowFloors(0.5, 0.5); len(f) != 1 || !strings.Contains(f[0], "label drop F1 0.000") {
-		t.Fatalf("floors 0.5: %v", f)
+func TestBelowFloorsAxis1Only(t *testing.T) {
+	// Axis 2 (agreement with model labels) is all wrong; axis 1 is mixed.
+	a1 := &Axis1{Rows: 4, Positive: 2, Items: Score([]string{"post", "post", "drop", "drop"}, []string{"post", "drop", "drop", "post"}, Labels),
+		AUC: 0.75, PrecisionPost: 0.5, RecallPopular: 0.5}
+	r := &EvalReport{Axis1: a1, Items: Score([]string{"post", "drop"}, []string{"drop", "post"}, Labels),
+		Pairs: Score([]string{"same"}, []string{"different"}, []string{"same", "different"})[0], PairRows: 1}
+	if f := r.BelowFloors(Floors{}); len(f) != 0 {
+		t.Fatalf("no floors: %v", f)
 	}
-	if f := r.BelowFloors(0, 0.7); len(f) != 1 || !strings.Contains(f[0], "pairwise cluster F1 0.667") {
-		t.Fatalf("pair floor: %v", f)
+	// Floors axis 1 meets pass, however bad axis 2 is.
+	if f := r.BelowFloors(Floors{F1: 0.5, AUC: 0.75, PrecisionPost: 0.5, RecallPopular: 0.5}); len(f) != 0 {
+		t.Fatalf("axis 1 at its floors: %v", f)
 	}
-	if f := r.BelowFloors(0, 0); len(f) != 0 {
-		t.Fatalf("zero floors: %v", f)
+	f := r.BelowFloors(Floors{AUC: 0.76, PrecisionPost: 0.51, RecallPopular: 0.51, F1: 0.51})
+	want := []string{"axis 1: label post F1 0.500 < floor 0.510", "axis 1: label drop F1 0.500 < floor 0.510",
+		"axis 1: AUC 0.750 < floor 0.760", "axis 1: precision@post 0.500 < floor 0.510", "axis 1: recall of popular items 0.500 < floor 0.510"}
+	if strings.Join(f, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q\nwant %q", f, want)
+	}
+	// With a floor set, an unscorable axis 1 fails instead of passing.
+	if f := (&EvalReport{}).BelowFloors(Floors{AUC: 0.5}); len(f) != 1 || !strings.Contains(f[0], "no item has a popularity truth label") {
+		t.Fatalf("no truth: %v", f)
+	}
+	if f := (&EvalReport{Axis1: &Axis1{Rows: 3, Positive: 0}}).BelowFloors(Floors{AUC: 0.5}); len(f) != 1 || !strings.Contains(f[0], "undefined") {
+		t.Fatalf("no positives: %v", f)
+	}
+}
+
+func TestAUCPinned(t *testing.T) {
+	// pos {0.9, 0.5}, neg {0.5, 0.1, 0.7}: 0.9 beats all 3; 0.5 ties 0.5
+	// (0.5), beats 0.1, loses to 0.7. U = 3 + 1.5 = 4.5 of 6.
+	got := AUC([]float64{0.9, 0.5, 0.5, 0.1, 0.7}, []bool{true, true, false, false, false})
+	if got != 0.75 {
+		t.Fatalf("AUC = %v, want 0.75", got)
+	}
+	if AUC([]float64{1, 2}, []bool{true, true}) != 0 || AUC(nil, nil) != 0 {
+		t.Fatal("AUC with one class empty must be 0")
 	}
 }
 

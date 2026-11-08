@@ -30,9 +30,15 @@ type CmdOpts struct {
 
 	Labels      string
 	FloorF1     float64
-	FloorPairF1 float64
 	HumanOnly   bool
 	Predictions string
+
+	Truth              string // eval: popularity truth file (editor truth's cache)
+	Refresh            bool   // truth: look up rows already labelled
+	FloorAUC           float64
+	FloorPrecisionPost float64
+	FloorRecallPopular float64
+	OnlyIDs            string // label-draft: draft only the item ids of this labels file
 
 	MinPoints   int
 	MinAgeHours int
@@ -103,6 +109,18 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 			fmt.Fprintln(out, "ERROR", err)
 			return 2
 		}
+		var only map[string]bool
+		if o.OnlyIDs != "" {
+			rows, err := ReadLabels(o.OnlyIDs)
+			if err != nil {
+				fmt.Fprintln(out, "ERROR", err)
+				return 2
+			}
+			only = map[string]bool{}
+			for _, r := range rows {
+				only[r.ID] = true
+			}
+		}
 		skip := map[string]bool{}
 		if o.Skip != "" {
 			rows, err := ReadLabels(o.Skip)
@@ -114,7 +132,7 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 				skip[r.ID] = true
 			}
 		}
-		err = LabelDraft(ctx, LabelOptions{Config: o.Config, Hub: hub, Model: model, Out: o.Out, Source: o.LabelSource, NItems: o.NItems, NPairs: o.NPairs, Skip: skip, Log: out})
+		err = LabelDraft(ctx, LabelOptions{Config: o.Config, Hub: hub, Model: model, Out: o.Out, Source: o.LabelSource, NItems: o.NItems, NPairs: o.NPairs, Skip: skip, Only: only, Log: out})
 		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
 		if err != nil {
 			fmt.Fprintln(out, "ERROR", err)
@@ -132,6 +150,14 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 			return 2
 		}
 		eo := EvalOptions{Config: o.Config, Model: model, Labels: o.Labels, HumanOnly: o.HumanOnly}
+		if o.Truth != "" {
+			tr, err := ReadTruth(o.Truth)
+			if err != nil {
+				fmt.Fprintln(out, "ERROR", err)
+				return 2
+			}
+			eo.Truth = tr
+		}
 		if o.Predictions != "" {
 			pf, err := os.OpenFile(o.Predictions, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
@@ -148,12 +174,22 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 		}
 		rep.Write(out)
 		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
-		if fails := rep.BelowFloors(o.FloorF1, o.FloorPairF1); len(fails) > 0 {
+		if fails := rep.BelowFloors(Floors{F1: o.FloorF1, AUC: o.FloorAUC, PrecisionPost: o.FloorPrecisionPost, RecallPopular: o.FloorRecallPopular}); len(fails) > 0 {
 			for _, f := range fails {
 				fmt.Fprintln(out, "FAIL", f)
 			}
 			return 1
 		}
+		return 0
+	case "truth":
+		rep, err := Truth(ctx, TruthOptions{Config: o.Config, Hub: hub, HTTP: o.HTTP, StateDir: o.StateDir, Refresh: o.Refresh,
+			Delay: 250 * time.Millisecond, Log: out})
+		if err != nil {
+			fmt.Fprintln(out, "ERROR", err)
+			return 1
+		}
+		rep.Write(out)
+		fmt.Fprintf(out, "wrote %s\n", TruthPath(o.StateDir))
 		return 0
 	case "agree":
 		ao := AgreeOptions{Config: o.Config, Hub: hub, StateDir: o.StateDir, HTTP: o.HTTP, MinPoints: o.MinPoints,

@@ -102,6 +102,10 @@ type LabelOptions struct {
 	// Skip are row ids already labelled (a previous draft): they are not
 	// drafted again, so a stopped draft can be resumed into a new file.
 	Skip map[string]bool
+	// Only, if set, restricts the draft to these row ids: item ids pick
+	// items, and "<a>+<b>" pair ids are drafted as those exact pairs instead
+	// of a fresh candidate sample. It re-drafts one sample with another model.
+	Only map[string]bool
 	Log  io.Writer
 }
 
@@ -172,7 +176,7 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 	// ---- items ----
 	var pool []Item
 	for _, it := range items {
-		if it.Channel == o.Source && !o.Skip[it.ID] {
+		if it.Channel == o.Source && !o.Skip[it.ID] && (o.Only == nil || o.Only[it.ID]) {
 			pool = append(pool, it)
 		}
 	}
@@ -222,7 +226,12 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 	}
 
 	// ---- pairs ----
-	pairs, err := candidatePairs(ctx, o.Model, o.Config, items, o.NPairs, o.Skip)
+	var pairs []pair
+	if o.Only != nil {
+		pairs, err = onlyPairs(ctx, o.Model, o.Config, items, o.Only, o.Skip)
+	} else {
+		pairs, err = candidatePairs(ctx, o.Model, o.Config, items, o.NPairs, o.Skip)
+	}
 	if err != nil {
 		return fmt.Errorf("candidate pairs: %w", err)
 	}
@@ -267,6 +276,46 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 		return errors.New("no labels were produced")
 	}
 	return nil
+}
+
+// onlyPairs are the pairs named in only ("<a>+<b>") whose two items are both
+// still in the sources, in id order, with their embedding cosine.
+func onlyPairs(ctx context.Context, m *Model, cfg *Config, items []Item, only, skip map[string]bool) ([]pair, error) {
+	byID := map[string]Item{}
+	for _, it := range items {
+		byID[it.ID] = it
+	}
+	var ids []string
+	for id := range only {
+		if a, b, ok := strings.Cut(id, "+"); ok && !skip[id] && byID[a].ID != "" && byID[b].ID != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var texts []string
+	for _, id := range ids {
+		a, b, _ := strings.Cut(id, "+")
+		texts = append(texts, clipText(byID[a].Text(), maxEmbedText), clipText(byID[b].Text(), maxEmbedText))
+	}
+	var vecs [][]float64
+	for start := 0; start < len(texts); start += embedBatch {
+		embs, err := m.Embed(ctx, cfg.EmbedModel, texts[start:min(start+embedBatch, len(texts))])
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range embs {
+			vecs = append(vecs, unit(e))
+		}
+	}
+	out := make([]pair, len(ids))
+	for i, id := range ids {
+		a, b, _ := strings.Cut(id, "+")
+		out[i] = pair{byID[a], byID[b], cosine(vecs[2*i], vecs[2*i+1])}
+	}
+	return out, nil
 }
 
 func side(it Item) *PairSide {

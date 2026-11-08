@@ -34,7 +34,26 @@ type Config struct {
 
 	Cluster ClusterConfig `json:"cluster"`
 	Decide  DecideConfig  `json:"decide"`
+	Truth   TruthConfig   `json:"truth"`
 	Topics  []Topic       `json:"topics"`
+}
+
+// TruthConfig maps outside popularity signals to labels for `editor truth`
+// (see truth.go). A value at or above *Post is post, at or above *Digest is
+// digest, below is drop. Items younger than MinAgeHours, and items with no
+// signal at all, are unknown.
+type TruthConfig struct {
+	MinAgeHours int `json:"min_age_hours"`
+	// HF Daily Papers upvotes, for arXiv papers.
+	HFPost   int `json:"hf_post"`
+	HFDigest int `json:"hf_digest"`
+	// HN points (Algolia), for everything else.
+	HNPost   int `json:"hn_post"`
+	HNDigest int `json:"hn_digest"`
+	// ReleaseLabel is the fixed label of a GitHub release page: there is no
+	// cheap popularity signal for one (release reactions need an API token
+	// to read at any volume).
+	ReleaseLabel string `json:"release_label"`
 }
 
 // ClusterConfig tunes story clustering.
@@ -59,6 +78,13 @@ type ClusterConfig struct {
 type DecideConfig struct {
 	Post   float64 `json:"post"`
 	Digest float64 `json:"digest"`
+	// Question is the wording asked: "v1" (topicality and notability) or
+	// "v2" (the rubric, framed as notability for agent and LLM builders).
+	Question string `json:"question,omitempty"`
+	// API is how the decision model is called: "decisions" (OpenRouter's
+	// Decisions API) or "chat" (a chat model with structured output that
+	// answers the three probabilities).
+	API string `json:"api,omitempty"`
 }
 
 // Topic is one top-<topic> channel the editor owns.
@@ -98,7 +124,7 @@ func (c *Config) Defaults() {
 		c.DecisionModel = "scaledown/classify-1-20260928"
 	}
 	if c.LabelModel == "" {
-		c.LabelModel = "anthropic/claude-sonnet-5.5-20260928"
+		c.LabelModel = "deepseek/deepseek-v4.1-flash"
 	}
 	if c.Prices == nil {
 		c.Prices = map[string][2]float64{}
@@ -129,6 +155,30 @@ func (c *Config) Defaults() {
 	if c.Decide.Digest == 0 {
 		c.Decide.Digest = 0.5
 	}
+	if c.Decide.Question == "" {
+		c.Decide.Question = "v1"
+	}
+	if c.Decide.API == "" {
+		c.Decide.API = "decisions"
+	}
+	if c.Truth.MinAgeHours == 0 {
+		c.Truth.MinAgeHours = 48
+	}
+	if c.Truth.HFPost == 0 {
+		c.Truth.HFPost = DefaultHFPost
+	}
+	if c.Truth.HFDigest == 0 {
+		c.Truth.HFDigest = DefaultHFDigest
+	}
+	if c.Truth.HNPost == 0 {
+		c.Truth.HNPost = 100
+	}
+	if c.Truth.HNDigest == 0 {
+		c.Truth.HNDigest = 10
+	}
+	if c.Truth.ReleaseLabel == "" {
+		c.Truth.ReleaseLabel = "digest"
+	}
 	for i := range c.Topics {
 		if c.Topics[i].MaxPerRun == 0 {
 			c.Topics[i].MaxPerRun = 5
@@ -136,9 +186,27 @@ func (c *Config) Defaults() {
 	}
 }
 
+// DefaultHFPost and DefaultHFDigest are the HF Daily Papers upvote
+// thresholds. Measured 2026-11-08 over every paper HF listed on Daily Papers
+// from 2026-10-30 to 2026-11-08 (n=245: p50 12, p75 25, p85 38, p90 48,
+// max 144): 40 makes post the top 14.7% (36 of 245) of the papers HF readers
+// were shown, inside the 10-15% target; 10 sends the bottom ~40%, which got
+// almost no votes in front of the same readers, to drop. They were picked from
+// the Daily Papers population, not from the 29 #llm-papers items on it, so the
+// cut does not depend on the sample being scored.
+const (
+	DefaultHFPost   = 40
+	DefaultHFDigest = 10
+)
+
 // DefaultPrices are the OpenRouter list prices (USD per million tokens,
 // [input, output]) read from /api/v1/models on 2026-11-08.
 var DefaultPrices = map[string][2]float64{
+	// DeepSeek V4.1 Flash: $0.051/M input, $0.567/M output (the undated
+	// alias; the 2026-10-17 snapshot "-1017" lists $0.006/$0.5).
+	"deepseek/deepseek-v4.1-flash":         {0.051, 0.567},
+	"deepseek/deepseek-v4.1-flash-1017":    {0.006, 0.5},
+	"perplexity/pplx-decider-v1.2":         {0.02, 0},
 	"openai/text-embedding-3-small":        {0.02, 0},
 	"scaledown/classify-1-20260928":        {0.04, 0},
 	"scaledown/classify-1":                 {0.04, 0},
@@ -166,6 +234,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Decide.Post <= 0 || c.Decide.Post > 1 || c.Decide.Digest <= 0 || c.Decide.Digest > 1 {
 		return fmt.Errorf("decide: thresholds must be in (0, 1]")
+	}
+	if c.Decide.Question != "v1" && c.Decide.Question != "v2" {
+		return fmt.Errorf("decide: question must be v1 or v2")
+	}
+	if c.Decide.API != "decisions" && c.Decide.API != "chat" {
+		return fmt.Errorf("decide: api must be decisions or chat")
+	}
+	if t := c.Truth; t.HFDigest < 1 || t.HFPost <= t.HFDigest || t.HNDigest < 1 || t.HNPost <= t.HNDigest {
+		return fmt.Errorf("truth: want 1 <= *_digest < *_post")
+	}
+	if !contains(Labels, c.Truth.ReleaseLabel) {
+		return fmt.Errorf("truth: release_label must be post, digest or drop")
 	}
 	src := map[string]bool{}
 	for _, s := range c.Sources {

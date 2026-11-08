@@ -294,6 +294,18 @@ func (m *Model) Decide(ctx context.Context, model string, state any, questions m
 // Chat calls /api/v1/chat/completions and returns the assistant's text and
 // whether it was cut off at maxTokens (finish_reason "length").
 func (m *Model) Chat(ctx context.Context, model, system, user string, maxTokens int) (string, bool, error) {
+	return m.chat(ctx, model, system, user, maxTokens, nil)
+}
+
+// ChatJSON is Chat with a strict JSON-schema structured output.
+func (m *Model) ChatJSON(ctx context.Context, model, system, user string, maxTokens int, schema map[string]any) (string, bool, error) {
+	return m.chat(ctx, model, system, user, maxTokens, map[string]any{
+		"response_format": map[string]any{"type": "json_schema",
+			"json_schema": map[string]any{"name": "answer", "strict": true, "schema": schema}},
+	})
+}
+
+func (m *Model) chat(ctx context.Context, model, system, user string, maxTokens int, extra map[string]any) (string, bool, error) {
 	var out struct {
 		Choices []struct {
 			Message struct {
@@ -312,6 +324,13 @@ func (m *Model) Chat(ctx context.Context, model, system, user string, maxTokens 
 			{"role": "user", "content": user},
 		},
 		"usage": map[string]bool{"include": true},
+		// Reasoning off: DeepSeek V4.1 Flash reasons by default, and its
+		// reasoning tokens are billed as output and count against
+		// max_tokens (on 2026-11-08 they truncated 154 of 200 label rows).
+		"reasoning": map[string]any{"enabled": false},
+	}
+	for k, v := range extra {
+		req[k] = v
 	}
 	if err := m.post(ctx, "/api/v1/chat/completions", model, req, maxTokens, &out, func() float64 { return out.Usage.cost() }); err != nil {
 		return "", false, err

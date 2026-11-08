@@ -417,10 +417,37 @@ stay deterministic; the top channels' about text says that a model selects their
 editor measure     -config c.json                          # read-only, no model: duplicate rates
 editor run         -config c.json -key k -state dir        # dry run: reads, clusters, decides, prints
 editor run         -config c.json -key k -state dir -post  # submits
-editor label-draft -config c.json -out labels.jsonl        # draft labels from a stronger model
-editor eval        -config c.json -labels labels.jsonl     # P/R/F1 per label + pairwise cluster F1
+editor label-draft -config c.json -out labels.jsonl        # draft labels (DeepSeek V4.1 Flash)
+editor truth       -config c.json -state dir               # read-only: popularity labels from HF / HN
+editor eval        -config c.json -labels labels.jsonl -truth dir/truth.json
 editor agree       -config c.json                          # read-only: HN / Lobsters for 48h+ items
 ```
+
+**Truth and eval.** No person labels anything, and a model's labels are not ground truth: if one
+model both labels and decides, scoring it against its own labels is circular. `editor truth`
+therefore derives a label per item from popularity signals outside the editor and caches it in
+`<state>/truth.json` (ids, canonical URL, the value and the label; no item text):
+
+- arXiv papers: Hugging Face Daily Papers upvotes (`GET huggingface.co/api/papers/<arXiv id>`).
+  `truth.hf_post` (40) and above is `post`, `truth.hf_digest` (10) and above is `digest`, below
+  is `drop`. A paper that is not on HF (404), or whose page never went to Daily Papers, has no
+  signal.
+- other links: the highest HN points (Algolia) of a submission with the same canonical URL
+  (`hn_post` 100, `hn_digest` 10). A link never submitted has no signal.
+- GitHub release pages: `release_label` (`digest`). There is no cheap signal.
+
+An item younger than `truth.min_age_hours` (48), or whose Daily Papers date is, and every item
+with no signal, is **unknown**, never `drop`. A cached label is not looked up again but always
+follows the current thresholds; unknown items are looked up again on the next run.
+
+`eval` scores on two axes. **Axis 1**, against the popularity truth: precision of `post`, recall
+of the popular (truth `post`) items, and the AUC of P(post) between truth `post` and the rest.
+**Axis 2**, against the labels file: per-label P/R/F1 and pairwise cluster F1, printed as
+agreement with a model, not truth. Only axis 1 has floors (`-floor-auc`,
+`-floor-precision-post`, `-floor-recall-popular`, `-floor-f1`); with a floor set, eval fails
+when axis 1 cannot be scored. `decide.api` is `decisions` (the Decisions API) or `chat` (a chat
+model answering the three probabilities as structured output), and `decide.question` is `v1` or
+`v2` (`editor/decide.go`).
 
 The OpenRouter key comes from `$OPENROUTER_API_KEY` or `-openrouter-key-file`, never a flag
 value. Every model call reserves its worst-case cost against `max_spend_usd` first and is refused

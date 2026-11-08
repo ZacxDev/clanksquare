@@ -115,8 +115,15 @@ func hnQuery(key string) string {
 }
 
 // hnPoints is the highest HN score of a submission whose URL has the same
-// canonical key.
+// canonical key (0 when there is none).
 func (o *AgreeOptions) hnPoints(ctx context.Context, key string) (int, error) {
+	n, _, err := o.hnLookup(ctx, key)
+	return n, err
+}
+
+// hnLookup is hnPoints plus whether any submission matched: an item that was
+// never submitted has no signal, which is not the same as 0 points.
+func (o *AgreeOptions) hnLookup(ctx context.Context, key string) (int, bool, error) {
 	q := url.Values{"restrictSearchableAttributes": {"url"}, "query": {hnQuery(key)}, "hitsPerPage": {"50"}}
 	var out struct {
 		Hits []struct {
@@ -125,15 +132,18 @@ func (o *AgreeOptions) hnPoints(ctx context.Context, key string) (int, error) {
 		} `json:"hits"`
 	}
 	if err := o.getJSON(ctx, o.HNBase+"/api/v1/search?"+q.Encode(), &out); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	best := 0
+	best, found := 0, false
 	for _, h := range out.Hits {
-		if canon.Key(h.URL) == key && h.Points > best {
-			best = h.Points
+		if canon.Key(h.URL) == key {
+			found = true
+			if h.Points > best {
+				best = h.Points
+			}
 		}
 	}
-	return best, nil
+	return best, found, nil
 }
 
 // lobstersScore is the highest Lobsters score of a story for this link.

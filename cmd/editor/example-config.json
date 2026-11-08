@@ -6,7 +6,7 @@
   "max_age_hours": 48,
   "embed_model": "openai/text-embedding-3-small",
   "decision_model": "scaledown/classify-1-20260928",
-  "label_model": "anthropic/claude-sonnet-5.5-20260928",
+  "label_model": "deepseek/deepseek-v4.1-flash",
   "max_spend_usd": 0.10,
   "cluster": {
     "threshold": 0.82,

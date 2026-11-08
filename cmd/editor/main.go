@@ -6,7 +6,8 @@
 //	editor run         -config c.json -key k -state dir     # dry run (default)
 //	editor run         -config c.json -key k -state dir -post
 //	editor label-draft -config c.json -out labels.jsonl -items 200 -pairs 200
-//	editor eval        -config c.json -labels labels.jsonl [-floor-f1 0.5]
+//	editor truth       -config c.json -state dir              # read-only: HF/HN popularity labels
+//	editor eval        -config c.json -labels labels.jsonl -truth dir/truth.json [-floor-auc 0.6]
 //	editor agree       -config c.json [-state dir]          # read-only
 //	editor genkey      <path>
 //
@@ -28,7 +29,7 @@ import (
 func main() { os.Exit(run(os.Args[1:])) }
 
 func usage() int {
-	fmt.Fprintln(os.Stderr, "usage: editor measure|run|label-draft|eval|agree|genkey [flags] (editor <cmd> -h)")
+	fmt.Fprintln(os.Stderr, "usage: editor measure|run|label-draft|truth|eval|agree|genkey [flags] (editor <cmd> -h)")
 	return 2
 }
 
@@ -67,12 +68,19 @@ func run(args []string) int {
 		fs.IntVar(&o.NPairs, "pairs", 200, "pair labels to draft")
 		fs.StringVar(&o.LabelSource, "source", "llm-papers", "raw channel to sample items from")
 		fs.StringVar(&o.Skip, "skip", "", "labels JSONL whose ids are not drafted again (resume a stopped draft into a new -out file)")
+		fs.StringVar(&o.OnlyIDs, "only", "", "labels JSONL: draft only its item ids (re-draft the same sample with another model)")
+	case "truth":
+		fs.StringVar(&o.StateDir, "state", "", "directory holding the truth cache, truth.json (required)")
+		fs.BoolVar(&o.Refresh, "refresh", false, "look up items the cache already labels, too")
 	case "eval":
 		fs.StringVar(&o.Labels, "labels", "", "labels JSONL (required)")
-		fs.Float64Var(&o.FloorF1, "floor-f1", 0, "exit 1 if any label's F1 (with support) is below this")
-		fs.Float64Var(&o.FloorPairF1, "floor-pair-f1", 0, "exit 1 if pairwise cluster F1 is below this")
+		fs.StringVar(&o.Truth, "truth", "", "popularity truth file written by editor truth (axis 1; the floors apply to it only)")
+		fs.Float64Var(&o.FloorF1, "floor-f1", 0, "exit 1 if any label's F1 against the popularity truth (with support) is below this")
+		fs.Float64Var(&o.FloorAUC, "floor-auc", 0, "exit 1 if the AUC of P(post) against the popularity truth is below this")
+		fs.Float64Var(&o.FloorPrecisionPost, "floor-precision-post", 0, "exit 1 if precision of post against the popularity truth is below this")
+		fs.Float64Var(&o.FloorRecallPopular, "floor-recall-popular", 0, "exit 1 if the share of popular (truth post) items posted is below this")
 		fs.StringVar(&o.Predictions, "predictions", "", "write each item row's truth, prediction and probabilities to this JSONL file (never overwritten)")
-		fs.BoolVar(&o.HumanOnly, "human-only", false, "score only rows with a human_label (else human_label, falling back to model_label)")
+		fs.BoolVar(&o.HumanOnly, "human-only", false, "axis 2: score only rows with a human_label (else human_label, falling back to model_label)")
 	case "agree":
 		fs.StringVar(&o.StateDir, "state", "", "state directory written by run -post: its decisions are used where it has them")
 		fs.IntVar(&o.MinPoints, "min-points", 100, "HN points that make an item 'popular'")

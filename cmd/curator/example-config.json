@@ -18,7 +18,33 @@
         {"url": "https://github.com/openai/openai-agents-python/releases.atom"},
         {"url": "https://github.com/langchain-ai/langgraph/releases.atom", "exclude": ["-rc", "-alpha", "-beta", "-dev"]},
         {"url": "https://github.com/ollama/ollama/releases.atom", "exclude": ["-rc"]},
-        {"url": "https://github.com/anomalyco/opencode/releases.atom"}
+        {"url": "https://github.com/anomalyco/opencode/releases.atom"},
+        {"url": "https://github.com/modelcontextprotocol/go-sdk/releases.atom", "exclude": ["-pre"]},
+        {"url": "https://github.com/modelcontextprotocol/java-sdk/releases.atom"},
+        {"url": "https://github.com/modelcontextprotocol/rust-sdk/releases.atom", "exclude": ["rmcp-macros"]},
+        {"url": "https://github.com/modelcontextprotocol/csharp-sdk/releases.atom"},
+        {"url": "https://github.com/vllm-project/vllm/releases.atom"},
+        {"url": "https://github.com/ggml-org/llama.cpp/releases.atom", "max_per_run": 1}
+      ]
+    },
+    {
+      "slug": "agent-news",
+      "title": "Agent & LLM news",
+      "about": "Agent and LLM news and discussion: Hacker News stories above a points threshold (via hnrss.org), the Lobsters ai tag, and a few AI developers' Bluesky posts. Selected by keyword and points by a deterministic curator; the link is the source of truth.",
+      "tags": ["agents", "llm", "news", "hn"],
+      "max_per_run": 6,
+      "feeds": [
+        {"name": "Hacker News (claude, 50+ points)", "url": "https://hnrss.org/newest?q=claude&points=50"},
+        {"name": "Hacker News (MCP, 50+ points)", "url": "https://hnrss.org/newest?q=MCP&points=50"},
+        {"name": "Hacker News (opencode, 20+ points)", "url": "https://hnrss.org/newest?q=opencode&points=20"},
+        {"name": "Hacker News (agent, 100+ points)", "url": "https://hnrss.org/newest?q=agent&points=100"},
+        {"name": "Hacker News (llm, 100+ points)", "url": "https://hnrss.org/newest?q=llm&points=100"},
+        {"name": "Lobsters (ai tag)", "url": "https://lobste.rs/t/ai.rss"},
+        {"url": "https://bsky.app/profile/simonwillison.net/rss", "title_from_summary": true, "include": ["llm", "agent", "claude", "mcp", "model", "gpt", "gemini", "openai", "anthropic", "prompt", "inference"]},
+        {"url": "https://bsky.app/profile/natolambert.bsky.social/rss", "title_from_summary": true, "include": ["llm", "agent", "claude", "mcp", "model", "gpt", "gemini", "openai", "anthropic", "prompt", "inference"]},
+        {"url": "https://bsky.app/profile/hamel.bsky.social/rss", "title_from_summary": true, "include": ["llm", "agent", "claude", "mcp", "model", "gpt", "gemini", "openai", "anthropic", "prompt", "inference"]},
+        {"kind": "xsearch", "disabled": true, "allowed_x_handles": ["AnthropicAI", "claudeai", "OpenAIDevs", "xai", "GoogleDeepMind", "ollama", "vllm_project", "ggerganov", "simonw", "karpathy"], "lookback_hours": 24, "interval_hours": 6},
+        {"kind": "xsearch", "disabled": true, "query": "new MCP server or Model Context Protocol release", "lookback_hours": 24, "interval_hours": 12}
       ]
     },
     {
@@ -29,11 +55,7 @@
       "max_per_run": 6,
       "max_age_hours": 120,
       "feeds": [
-        {
-          "name": "arXiv (cs.AI, cs.CL)",
-          "url": "https://export.arxiv.org/api/query?search_query=%28cat:cs.AI+OR+cat:cs.CL%29+AND+%28abs:agent+OR+abs:agents+OR+abs:%22tool+use%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50",
-          "include": ["agent", "tool use", "tool-use", "tool calling", "function calling"]
-        }
+        {"name": "arXiv (cs.AI, cs.CL)", "url": "https://export.arxiv.org/api/query?search_query=%28cat:cs.AI+OR+cat:cs.CL%29+AND+%28abs:agent+OR+abs:agents+OR+abs:%22tool+use%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50", "include": ["agent", "tool use", "tool-use", "tool calling", "function calling"]}
       ]
     },
     {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/ZacxDev/clanksquare/internal/hubkit"
 )
@@ -14,7 +16,8 @@ import (
 // File format (JSON, version 1):
 //
 //	{"version":1,"channels":{"c_…":{"slug":"…","seen":{"<dedupe key>":<first-seen unix ms>},
-//	                                 "pending":{"<dedupe key>":"<signed token>"}}}}
+//	                                 "pending":{"<dedupe key>":"<signed token>"}}},
+//	 "discord_cursors":{"<discord channel id>":"<newest message id read>"}}
 //
 // Seen keys are never forgotten. A pending entry is a write-ahead record: it
 // is saved before its token is submitted and replaced by a seen key once the
@@ -24,6 +27,11 @@ import (
 type State struct {
 	Version  int                      `json:"version"`
 	Channels map[string]*ChannelState `json:"channels"`
+	// DiscordCursors holds, per Discord channel, the newest message id
+	// already read: the next run asks only for messages after it. Losing it
+	// is safe: the next read starts at max_age_hours ago and the seen set
+	// drops what was already posted.
+	DiscordCursors map[string]string `json:"discord_cursors,omitempty"`
 }
 
 // ChannelState is one channel's seen set, keyed by channel id so a slug that
@@ -34,7 +42,9 @@ type ChannelState struct {
 	Pending map[string]string `json:"pending,omitempty"`
 }
 
-func newState() *State { return &State{Version: 1, Channels: map[string]*ChannelState{}} }
+func newState() *State {
+	return &State{Version: 1, Channels: map[string]*ChannelState{}, DiscordCursors: map[string]string{}}
+}
 
 // LoadState reads a state file. A missing file returns (nil, nil): there is
 // nothing cached and every channel is rebuilt from its log. An unreadable or
@@ -57,6 +67,9 @@ func LoadState(path string) (*State, error) {
 	if s.Channels == nil {
 		s.Channels = map[string]*ChannelState{}
 	}
+	if s.DiscordCursors == nil {
+		s.DiscordCursors = map[string]string{}
+	}
 	for id, cs := range s.Channels {
 		if cs == nil || cs.Seen == nil && len(cs.Pending) == 0 {
 			delete(s.Channels, id) // rebuilt from the log
@@ -65,6 +78,7 @@ func LoadState(path string) (*State, error) {
 		if cs.Seen == nil {
 			cs.Seen = map[string]int64{}
 		}
+		cs.rekey()
 	}
 	return &s, nil
 }
@@ -78,4 +92,45 @@ func (s *State) Save(path string) error {
 		return err
 	}
 	return hubkit.WriteFileAtomic(path, append(raw, '\n'))
+}
+
+// rekey re-derives every key with the current NormalizeLink, so a key saved
+// by an older normalisation (twitter.com before it mapped to x.com) still
+// matches the key the same item gets now. Keys are keyFromLine outputs, and
+// NormalizeLink only ever narrows what it maps (never widens what it
+// accepts), so a link key stays a link key and a guid key stays as it is.
+func (cs *ChannelState) rekey() {
+	seen := make(map[string]int64, len(cs.Seen))
+	for k, at := range cs.Seen {
+		k = rekeyOne(k)
+		if prev, ok := seen[k]; !ok || at < prev {
+			seen[k] = at
+		}
+	}
+	cs.Seen = seen
+	if len(cs.Pending) > 0 {
+		keys := make([]string, 0, len(cs.Pending))
+		for k := range cs.Pending {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		pending := make(map[string]string, len(cs.Pending))
+		for _, k := range keys {
+			nk := rekeyOne(k)
+			if _, dup := pending[nk]; !dup {
+				pending[nk] = cs.Pending[k]
+			}
+		}
+		cs.Pending = pending
+	}
+}
+
+func rekeyOne(k string) string {
+	if strings.HasPrefix(k, "guid:") {
+		return k
+	}
+	if n := NormalizeLink(k); n != "" {
+		return n
+	}
+	return k
 }

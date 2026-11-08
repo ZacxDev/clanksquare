@@ -164,7 +164,8 @@ func Truncate(s string, max int) string {
 }
 
 // NormalizeLink returns the dedupe form of a feed link: an absolute http(s)
-// URL with the scheme and host lowercased, the fragment dropped and every
+// URL with the scheme and host lowercased, twitter.com (and its www./mobile.
+// forms, and those of x.com) mapped to x.com, the fragment dropped and every
 // utm_* query parameter removed (the others keep their order). It returns ""
 // for anything that is not an absolute http(s) URL. NormalizeLink is
 // idempotent, which the state rebuild depends on.
@@ -182,6 +183,9 @@ func NormalizeLink(raw string) string {
 		return ""
 	}
 	u.Host = strings.ToLower(u.Host)
+	if xHosts[u.Host] {
+		u.Host = "x.com"
+	}
 	u.Fragment, u.RawFragment = "", ""
 	if u.RawQuery != "" {
 		var kept []string
@@ -206,6 +210,12 @@ func NormalizeLink(raw string) string {
 		return ""
 	}
 	return out
+}
+
+// xHosts are the hosts NormalizeLink maps to x.com: one post, one key.
+var xHosts = map[string]bool{
+	"twitter.com": true, "www.twitter.com": true, "mobile.twitter.com": true,
+	"www.x.com": true, "mobile.x.com": true,
 }
 
 // maxLink bounds a link (and a guid used in its place) in bytes.

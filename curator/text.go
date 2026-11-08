@@ -3,6 +3,7 @@ package curator
 import (
 	"html"
 	"net/url"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -165,9 +166,10 @@ func Truncate(s string, max int) string {
 
 // NormalizeLink returns the dedupe form of a feed link: an absolute http(s)
 // URL with the scheme and host lowercased, the fragment dropped and every
-// utm_* query parameter removed (the others keep their order). It returns ""
-// for anything that is not an absolute http(s) URL. NormalizeLink is
-// idempotent, which the state rebuild depends on.
+// utm_* query parameter removed (the others keep their order). An arXiv paper
+// link (abs, pdf or html, any version) becomes https://arxiv.org/abs/<id>, see
+// arxivKey. It returns "" for anything that is not an absolute http(s) URL.
+// NormalizeLink is idempotent, which the state rebuild depends on.
 func NormalizeLink(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || len(raw) > maxLink || strings.ContainsAny(raw, " \t\r\n") {
@@ -182,6 +184,9 @@ func NormalizeLink(raw string) string {
 		return ""
 	}
 	u.Host = strings.ToLower(u.Host)
+	if k := arxivKey(u); k != "" {
+		return k
+	}
 	u.Fragment, u.RawFragment = "", ""
 	if u.RawQuery != "" {
 		var kept []string
@@ -206,6 +211,30 @@ func NormalizeLink(raw string) string {
 		return ""
 	}
 	return out
+}
+
+// arxivHosts serve arXiv's abstract, PDF and HTML pages.
+var arxivHosts = map[string]bool{"arxiv.org": true, "www.arxiv.org": true, "export.arxiv.org": true}
+
+// arxivPathRe is an arXiv paper page: /abs/, /pdf/ or /html/, then a new-style
+// id (2401.12345) or an old-style one (hep-th/9901001, math.GT/0309136), an
+// optional version (v2), an optional .pdf, an optional trailing slash.
+var arxivPathRe = regexp.MustCompile(`^/(?:abs|pdf|html)/(\d{4}\.\d{4,5}|[a-z]+(?:-[a-z]+)?(?:\.[A-Za-z]{2})?/\d{7})(?:v\d+)?(?:\.pdf)?/?$`)
+
+// arxivKey returns https://arxiv.org/abs/<id> for a link to any version of an
+// arXiv paper's abstract, PDF or HTML page, whatever its scheme or query, so a
+// paper seen at v1 and later at v2 (or via Hugging Face Daily Papers, whose
+// ids carry no version) is one item. Anything else (another host, a port, a
+// page under the paper such as a figure) returns "".
+func arxivKey(u *url.URL) string {
+	if !arxivHosts[u.Host] || u.RawPath != "" {
+		return ""
+	}
+	m := arxivPathRe.FindStringSubmatch(u.Path)
+	if m == nil {
+		return ""
+	}
+	return "https://arxiv.org/abs/" + m[1]
 }
 
 // maxLink bounds a link (and a guid used in its place) in bytes.

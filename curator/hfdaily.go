@@ -35,13 +35,11 @@ const (
 // arxivIDRe is the post-2007 arXiv identifier, without a version suffix.
 var arxivIDRe = regexp.MustCompile(`^\d{4}\.\d{4,5}$`)
 
-// hfLink is the link of the arXiv paper id. It has the form the arXiv API
-// gives a paper's first version (https://arxiv.org/abs/<id>v1, see
-// testdata/arxiv.atom), so a paper posted from both an arXiv API feed and
-// hfdaily has one dedupe key. NormalizeLink does not strip arXiv version
-// suffixes, and changing it would change existing seen keys; a paper the
-// arXiv feed lists at v2 or later therefore does not dedupe with this link.
-func hfLink(id string) string { return "https://arxiv.org/abs/" + id + "v1" }
+// hfLink is the link of the arXiv paper id, without a version: NormalizeLink
+// maps every version of an arXiv abs/pdf/html link to this form, so a paper
+// posted from both an arXiv API feed (at any version) and hfdaily has one
+// dedupe key.
+func hfLink(id string) string { return "https://arxiv.org/abs/" + id }
 
 type hfDailyEntry struct {
 	Title string  `json:"title"`

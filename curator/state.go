@@ -84,10 +84,13 @@ func (s *State) Save(path string) error {
 }
 
 // rekey re-derives every key with the current NormalizeLink, so a key saved
-// by an older normalisation (twitter.com before it mapped to x.com) still
-// matches the key the same item gets now. Keys are keyFromLine outputs, and
-// NormalizeLink only ever narrows what it maps (never widens what it
-// accepts), so a link key stays a link key and a guid key stays as it is.
+// by an older normalisation (an arXiv link with its version, before every
+// version mapped to https://arxiv.org/abs/<id>) still matches the key the same
+// item gets now. Keys that collapse into one keep the earliest first-seen
+// time; pending entries that collapse keep the one whose old key sorts
+// first. Keys are keyFromLine outputs, and NormalizeLink only ever narrows
+// what it maps (never widens what it accepts), so a link key stays a link key
+// and a guid key stays as it is.
 func (cs *ChannelState) rekey() {
 	seen := make(map[string]int64, len(cs.Seen))
 	for k, at := range cs.Seen {

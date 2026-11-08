@@ -125,16 +125,16 @@ func TestHFDailyMapsPapers(t *testing.T) {
 	if want := []string{"2026-11-01", "2026-10-31"}; !reflect.DeepEqual(h.dates, want) {
 		t.Fatalf("requested dates %v, want %v (one request per date)", h.dates, want)
 	}
-	want := []string{"https://arxiv.org/abs/2610.12345v1", "https://arxiv.org/abs/2610.40641v1"}
+	want := []string{"https://arxiv.org/abs/2610.12345", "https://arxiv.org/abs/2610.40641"}
 	if got := w.hub.firstLines("news"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("posted %v\nwant %v (bad ids and bad dates must be skipped)", got, want)
 	}
 	p := w.hub.posts("news")
 	if p[1].Fields["subject"] != "Agentic weather <b>forecasts</b>" ||
-		p[1].Fields["body"] != "https://arxiv.org/abs/2610.40641v1\n\nLine one line two.\n\nvia Hugging Face Daily Papers" {
+		p[1].Fields["body"] != "https://arxiv.org/abs/2610.40641\n\nLine one line two.\n\nvia Hugging Face Daily Papers" {
 		t.Errorf("post 2: %q / %q", p[1].Fields["subject"], p[1].Fields["body"])
 	}
-	if p[0].Fields["body"] != "https://arxiv.org/abs/2610.12345v1\n\nWe study tools.\n\nvia Hugging Face Daily Papers" {
+	if p[0].Fields["body"] != "https://arxiv.org/abs/2610.12345\n\nWe study tools.\n\nvia Hugging Face Daily Papers" {
 		t.Errorf("post 1: %q", p[0].Fields["body"])
 	}
 }
@@ -149,7 +149,7 @@ func TestHFItemFields(t *testing.T) {
 	e := es[0]
 	e.Title = "Top-level title"
 	it, ok := hfItem(e)
-	want := Item{GUID: "hfdaily:2611.05376", Link: "https://arxiv.org/abs/2611.05376v1", Title: "Top-level title",
+	want := Item{GUID: "hfdaily:2611.05376", Link: "https://arxiv.org/abs/2611.05376", Title: "Top-level title",
 		Summary: "Abstract text", Date: utc("2026-11-06T00:00:00Z"), Author: "Hao Fei, Bo B, Cy C et al.", Source: "Hugging Face Daily Papers"}
 	if !ok || !reflect.DeepEqual(it, want) {
 		t.Fatalf("item %+v ok=%v\nwant %+v", it, ok, want)
@@ -258,7 +258,7 @@ func TestHFDailyDedupesWithArxiv(t *testing.T) {
 		w.run(opt)
 		var n int
 		for _, p := range w.hub.posts("news") {
-			if strings.HasPrefix(p.Fields["body"].(string), "https://arxiv.org/abs/2610.40641v1\n") {
+			if strings.HasPrefix(p.Fields["body"].(string), "https://arxiv.org/abs/2610.40641\n") {
 				n++
 				if !strings.HasSuffix(p.Fields["body"].(string), wantVia) {
 					t.Errorf("hfFirst=%v: body %q, want %s", hfFirst, p.Fields["body"], wantVia)
@@ -269,9 +269,9 @@ func TestHFDailyDedupesWithArxiv(t *testing.T) {
 			t.Fatalf("hfFirst=%v: paper 2610.40641 posted %d times, want once (arXiv and hfdaily must share a key)", hfFirst, n)
 		}
 	}
-	// Known limit, pinned: the arXiv feed's v2 link is a different key.
-	if NormalizeLink("https://arxiv.org/abs/2610.40000v2") == NormalizeLink(hfLink("2610.40000")) {
-		t.Errorf("v2 now dedupes: update the hfLink comment and the README")
+	// A later version in the arXiv feed is the same key too.
+	if a, b := NormalizeLink("https://arxiv.org/abs/2610.40000v2"), NormalizeLink(hfLink("2610.40000")); a != b || a != "https://arxiv.org/abs/2610.40000" {
+		t.Errorf("v2 %q, hfdaily %q: want both https://arxiv.org/abs/2610.40000", a, b)
 	}
 }
 
@@ -293,7 +293,7 @@ func TestHFDailyDisabledAndFilters(t *testing.T) {
 		tPaper{id: "2611.00004", title: "Diffusion", published: "2026-11-01T04:00:00.000Z"},
 	)
 	w.run(opt)
-	if got := w.hub.firstLines("news"); !reflect.DeepEqual(got, []string{"https://arxiv.org/abs/2611.00002v1"}) {
+	if got := w.hub.firstLines("news"); !reflect.DeepEqual(got, []string{"https://arxiv.org/abs/2611.00002"}) {
 		t.Fatalf("posted %v, want only the newest included, non-excluded paper (max_per_run 1)", got)
 	}
 }

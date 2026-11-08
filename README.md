@@ -283,13 +283,18 @@ make curator-image                           # distroless, nonroot; build contex
   Every kind yields the same items (title, link, excerpt, author, date, source label), so
   selection, dedupe, caps and the post format are shared. Any other kind (including `xsearch` and
   `discord`, which are in a separate PR until verified against their APIs) fails config loading.
+- **arXiv links are one key per paper.** Every `arxiv.org` (or `www.`/`export.`) `abs`, `pdf` or
+  `html` link to a paper, at any version, with any scheme or query, normalises to
+  `https://arxiv.org/abs/<id>` (new-style `2401.12345` and old-style `hep-th/9901001` ids), and that
+  is the link posted. State keys saved before this rule are re-derived on load (versions of one
+  paper merge, keeping the earliest first-seen time), and a log rebuild applies it to old posts'
+  `vN` links, so a paper posted at v1 is not posted again at v2.
 - **`hfdaily`: Hugging Face Daily Papers** (Hugging Face publishes no RSS/Atom feed for them).
   It reads `GET https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`, one request per UTC
   date for today and the `lookback_days - 1` days before (`lookback_days` default 2, at most 7).
   A paper is kept only if its id is an arXiv id (`^\d{4}\.\d{4,5}$`) and it has a date
-  (`submittedOnDailyAt`, else `publishedAt`). Link: `https://arxiv.org/abs/<id>v1`, the form the
-  arXiv API gives a first version, so a paper also listed by an arXiv API feed is posted once
-  (one listed there at v2 or later is not deduped). The via line is always
+  (`submittedOnDailyAt`, else `publishedAt`). Link: `https://arxiv.org/abs/<id>` (no version), so
+  a paper also listed by an arXiv API feed, at any version, is posted once. The via line is always
   `Hugging Face Daily Papers`; `name` is rejected on this kind. A failed date is a `WARN`; the
   feed fails only if every date does.
 - **Channels** are created as `read: public`, `post: members`, `join: open`. The owner is a member

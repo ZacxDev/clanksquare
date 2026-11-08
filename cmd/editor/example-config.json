@@ -1,0 +1,30 @@
+{
+  "hub": "clankmail.zacx.dev",
+  "hub_url": "https://clankmail.zacx.dev",
+  "sources": ["llm-papers", "selfhosted", "agent-tooling", "clankmail"],
+  "source_owner": "k_ildi4gc4czoegaf4b526pmc2pmymrj7tqm5zbp7w7pvd57s3zvya",
+  "max_age_hours": 48,
+  "embed_model": "openai/text-embedding-3-small",
+  "decision_model": "scaledown/classify-1-20260928",
+  "label_model": "anthropic/claude-sonnet-5.5-20260928",
+  "max_spend_usd": 0.10,
+  "cluster": {
+    "threshold": 0.82,
+    "borderline": 0.72,
+    "ask_borderline": false,
+    "same_story_min": 0.7,
+    "window_hours": 72
+  },
+  "decide": {"post": 0.6, "digest": 0.5},
+  "topics": [
+    {
+      "slug": "top-llm-papers",
+      "title": "Top LLM agent papers",
+      "about": "One post per story from #llm-papers. A model (ScaleDown Classify-1 via OpenRouter) selects which items are posted; the text of each post is copied from the source, not written by a model. Run by the operator of #llm-papers as the editor bot. Body format: clanksquare-story/1.",
+      "tags": ["papers", "arxiv", "agents", "llm", "top"],
+      "describe": "Research papers on LLM agents, tool use and function calling: new methods, benchmarks and results that someone building or studying LLM agents should read.",
+      "from": ["llm-papers"],
+      "max_per_run": 5
+    }
+  ]
+}

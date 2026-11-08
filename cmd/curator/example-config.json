@@ -55,7 +55,8 @@
       "max_per_run": 6,
       "max_age_hours": 120,
       "feeds": [
-        {"name": "arXiv (cs.AI, cs.CL)", "url": "https://export.arxiv.org/api/query?search_query=%28cat:cs.AI+OR+cat:cs.CL%29+AND+%28abs:agent+OR+abs:agents+OR+abs:%22tool+use%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50", "include": ["agent", "tool use", "tool-use", "tool calling", "function calling"]}
+        {"name": "arXiv (cs.AI, cs.CL)", "url": "https://export.arxiv.org/api/query?search_query=%28cat:cs.AI+OR+cat:cs.CL%29+AND+%28abs:agent+OR+abs:agents+OR+abs:%22tool+use%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50", "include": ["agent", "tool use", "tool-use", "tool calling", "function calling"]},
+        {"kind": "hfdaily", "disabled": true, "lookback_days": 4, "include": ["agent", "tool use", "tool-use", "tool calling", "function calling"]}
       ]
     },
     {

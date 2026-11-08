@@ -59,15 +59,17 @@ const (
 	KindRSS     = "rss"     // RSS 2.0, RSS 1.0 (RDF) or Atom at URL; the default
 	KindXSearch = "xsearch" // X posts found by xAI's x_search tool (xsearch.go)
 	KindDiscord = "discord" // one Discord channel, read by a bot (discord.go)
+	KindHFDaily = "hfdaily" // Hugging Face Daily Papers, as arXiv links (hfdaily.go)
 )
 
 // FeedConfig is one source and its keyword filters.
 type FeedConfig struct {
-	// Kind is rss (default), xsearch or discord.
+	// Kind is rss (default), xsearch, discord or hfdaily.
 	Kind string `json:"kind,omitempty"`
 	// URL is the feed URL (rss only).
 	URL string `json:"url,omitempty"`
-	// Name, when set, replaces the feed's own title in the "via" line.
+	// Name, when set, replaces the feed's own title in the "via" line
+	// (not allowed on hfdaily, whose via line is always HFDailySource).
 	Name    string   `json:"name,omitempty"`
 	Include []string `json:"include,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
@@ -93,6 +95,9 @@ type FeedConfig struct {
 	// discord: the channel to read and its server (for message permalinks).
 	ChannelID string `json:"channel_id,omitempty"`
 	GuildID   string `json:"guild_id,omitempty"`
+
+	// hfdaily: how many UTC dates to read, today included (default 2, ≤ 7).
+	LookbackDays int `json:"lookback_days,omitempty"`
 }
 
 // label names a source in logs. For rss it is the URL, as before.
@@ -102,6 +107,8 @@ func (f FeedConfig) label() string {
 		return "xsearch:" + f.sourceID()
 	case KindDiscord:
 		return "discord:" + f.ChannelID
+	case KindHFDaily:
+		return "hfdaily"
 	}
 	return f.URL
 }
@@ -225,17 +232,18 @@ func (f *FeedConfig) validate() error {
 	}
 	xs := len(f.AllowedXHandles) > 0 || f.Query != "" || f.LookbackHours != 0 || f.IntervalHours != 0 || f.Model != "" || f.MaxTurns != 0
 	dc := f.ChannelID != "" || f.GuildID != ""
+	hf := f.LookbackDays != 0
 	switch f.Kind {
 	case KindRSS:
-		if xs || dc {
-			return errors.New("xsearch/discord fields on an rss feed")
+		if xs || dc || hf {
+			return errors.New("xsearch/discord/hfdaily fields on an rss feed")
 		}
 		if u, err := url.Parse(f.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("feed url %q: want an http(s) URL", f.URL)
 		}
 	case KindXSearch:
-		if f.URL != "" || dc || f.TitleFromSummary {
-			return errors.New("url/discord/title_from_summary fields on an xsearch source")
+		if f.URL != "" || dc || hf || f.TitleFromSummary {
+			return errors.New("url/discord/hfdaily/title_from_summary fields on an xsearch source")
 		}
 		if len(f.AllowedXHandles) == 0 && strings.TrimSpace(f.Query) == "" {
 			return errors.New("xsearch needs allowed_x_handles and/or query")
@@ -276,14 +284,28 @@ func (f *FeedConfig) validate() error {
 			return fmt.Errorf("max_turns must be 1–%d", maxMaxTurns)
 		}
 	case KindDiscord:
-		if f.URL != "" || xs || f.TitleFromSummary {
-			return errors.New("url/xsearch/title_from_summary fields on a discord source")
+		if f.URL != "" || xs || hf || f.TitleFromSummary {
+			return errors.New("url/xsearch/hfdaily/title_from_summary fields on a discord source")
 		}
 		if !snowflakeRe.MatchString(f.ChannelID) || !snowflakeRe.MatchString(f.GuildID) {
 			return errors.New("discord needs channel_id and guild_id (numeric snowflakes)")
 		}
+	case KindHFDaily:
+		// No name: the via label must stay HFDailySource (see hfdaily.go).
+		if f.Name != "" {
+			return errors.New("name on an hfdaily source: its via label is always " + HFDailySource)
+		}
+		if f.URL != "" || xs || dc || f.TitleFromSummary {
+			return errors.New("url/xsearch/discord/title_from_summary fields on an hfdaily source")
+		}
+		if f.LookbackDays == 0 {
+			f.LookbackDays = defaultLookbackDays
+		}
+		if f.LookbackDays < 1 || f.LookbackDays > maxLookbackDays {
+			return fmt.Errorf("lookback_days must be 1–%d", maxLookbackDays)
+		}
 	default:
-		return fmt.Errorf("unknown kind %q (want rss, xsearch or discord)", f.Kind)
+		return fmt.Errorf("unknown kind %q (want rss, xsearch, discord or hfdaily)", f.Kind)
 	}
 	return nil
 }

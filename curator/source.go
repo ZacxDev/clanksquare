@@ -21,6 +21,8 @@ func (r *runner) fetchSource(ctx context.Context, ch *Channel, fc FeedConfig) (*
 		return r.fetchXSearch(ctx, ch, fc)
 	case KindDiscord:
 		return r.fetchDiscord(ctx, ch, fc)
+	case KindHFDaily:
+		return r.fetchHFDaily(ctx, ch, fc)
 	}
 	f, err := FetchFeed(ctx, r.Client, fc.URL)
 	if err == nil && fc.TitleFromSummary {

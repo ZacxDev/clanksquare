@@ -64,6 +64,7 @@ type Options struct {
 	// Discord rate limits (nil: a context-aware sleep).
 	xaiBase     string
 	discordBase string
+	hfBase      string
 	sleep       func(context.Context, time.Duration) error
 
 	// afterPost, when set (tests only), runs after each successful post and

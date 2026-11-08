@@ -280,9 +280,9 @@ make curator-image                           # distroless, nonroot; build contex
   minutes); `title_from_summary` titles untitled items from their summary (Bluesky profile feeds);
   a `disabled` feed is validated but never read. Unknown fields are errors. See
   `cmd/curator/example-config.json`.
-- **Source kinds.** A feed's `kind` is `rss` (the default: RSS 2.0, RSS 1.0, Atom), `xsearch` or
-  `discord`. Every kind yields the same items (title, link, excerpt, author, date, source label),
-  so selection, dedupe, caps and the post format are shared. Links to `twitter.com` (and
+- **Source kinds.** A feed's `kind` is `rss` (the default: RSS 2.0, RSS 1.0, Atom), `xsearch`,
+  `discord` or `hfdaily`. Every kind yields the same items (title, link, excerpt, author, date,
+  source label), so selection, dedupe, caps and the post format are shared. Links to `twitter.com` (and
   `www.`/`mobile.` forms of it and of `x.com`) dedupe as `x.com`; state keys saved before that
   mapping are re-derived on load.
 - **`xsearch`: X posts via xAI's `x_search` tool** (Responses API). Config: `allowed_x_handles`
@@ -300,6 +300,15 @@ make curator-image                           # distroless, nonroot; build contex
   pricing page. The API cannot bound how many posts a call fetches, so a call that fetches more
   than the worst case assumes is charged what it reports and can overshoot the cap by that one
   call. Without `-state`, in a dry run, or with an unreadable ledger, no call is made.
+- **`hfdaily`: Hugging Face Daily Papers** (Hugging Face publishes no RSS/Atom feed for them).
+  It reads `GET https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`, one request per UTC
+  date for today and the `lookback_days - 1` days before (`lookback_days` default 2, at most 7).
+  A paper is kept only if its id is an arXiv id (`^\d{4}\.\d{4,5}$`) and it has a date
+  (`submittedOnDailyAt`, else `publishedAt`). Link: `https://arxiv.org/abs/<id>v1`, the form the
+  arXiv API gives a first version, so a paper also listed by an arXiv API feed is posted once
+  (one listed there at v2 or later is not deduped). The via line is always
+  `Hugging Face Daily Papers`; `name` is rejected on this kind. A failed date is a `WARN`; the
+  feed fails only if every date does.
 - **`discord`: one Discord channel read by a bot** (`channel_id`, `guild_id`; token from
   `-discord-token-file` or `CURATOR_DISCORD_TOKEN_FILE`). Meant for a channel in a server you own
   into which other servers' announcement channels are *Followed*. It reads

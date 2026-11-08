@@ -49,13 +49,44 @@ type Channel struct {
 	Feeds       []FeedConfig `json:"feeds"`
 }
 
-// FeedConfig is one feed and its keyword filters.
+// Source kinds. Every kind yields Items; dedupe, filters, caps and posting
+// are shared (selectItems, formatPost).
+const (
+	KindRSS     = "rss"     // RSS 2.0, RSS 1.0 (RDF) or Atom at URL; the default
+	KindHFDaily = "hfdaily" // Hugging Face Daily Papers, as arXiv links (hfdaily.go)
+)
+
+// FeedConfig is one source and its keyword filters.
 type FeedConfig struct {
-	URL string `json:"url"`
-	// Name, when set, replaces the feed's own title in the "via" line.
+	// Kind is rss (default) or hfdaily.
+	Kind string `json:"kind,omitempty"`
+	// URL is the feed URL (rss only).
+	URL string `json:"url,omitempty"`
+	// Name, when set, replaces the feed's own title in the "via" line
+	// (not allowed on hfdaily, whose via line is always HFDailySource).
 	Name    string   `json:"name,omitempty"`
 	Include []string `json:"include,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
+	// Disabled sources are validated but never fetched.
+	Disabled bool `json:"disabled,omitempty"`
+	// MaxPerRun, when set, caps this source's posts per run, inside the
+	// channel's own cap (for a source that publishes far more often than the
+	// others in its channel).
+	MaxPerRun int `json:"max_per_run,omitempty"`
+	// TitleFromSummary (rss): an item with no title takes the start of its
+	// summary as its title (Bluesky profile feeds have no titles).
+	TitleFromSummary bool `json:"title_from_summary,omitempty"`
+
+	// hfdaily: how many UTC dates to read, today included (default 2, ≤ 7).
+	LookbackDays int `json:"lookback_days,omitempty"`
+}
+
+// label names a source in logs. For rss it is the URL, as before.
+func (f FeedConfig) label() string {
+	if f.Kind == KindHFDaily {
+		return "hfdaily"
+	}
+	return f.URL
 }
 
 // LoadConfig reads, defaults and validates a config file. Unknown fields are
@@ -135,11 +166,49 @@ func (c *Config) Validate() error {
 		if len(ch.Feeds) == 0 {
 			return fmt.Errorf("channel %q: no feeds", ch.Slug)
 		}
-		for _, f := range ch.Feeds {
-			if u, err := url.Parse(f.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				return fmt.Errorf("channel %q: feed url %q: want an http(s) URL", ch.Slug, f.URL)
+		for j := range ch.Feeds {
+			if err := ch.Feeds[j].validate(); err != nil {
+				return fmt.Errorf("channel %q: feed %d: %v", ch.Slug, j+1, err)
 			}
 		}
+	}
+	return nil
+}
+
+// validate fills a source's defaults and checks it. Fields that belong to
+// another kind are errors, so a misplaced field cannot silently do nothing.
+func (f *FeedConfig) validate() error {
+	if f.Kind == "" {
+		f.Kind = KindRSS
+	}
+	if f.MaxPerRun < 0 || f.MaxPerRun > maxMaxPerRun {
+		return fmt.Errorf("max_per_run must be 0–%d", maxMaxPerRun)
+	}
+	hf := f.LookbackDays != 0
+	switch f.Kind {
+	case KindRSS:
+		if hf {
+			return errors.New("hfdaily fields on an rss feed")
+		}
+		if u, err := url.Parse(f.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("feed url %q: want an http(s) URL", f.URL)
+		}
+	case KindHFDaily:
+		// No name: the via label must stay HFDailySource (see hfdaily.go).
+		if f.Name != "" {
+			return errors.New("name on an hfdaily source: its via label is always " + HFDailySource)
+		}
+		if f.URL != "" || f.TitleFromSummary {
+			return errors.New("url/title_from_summary fields on an hfdaily source")
+		}
+		if f.LookbackDays == 0 {
+			f.LookbackDays = defaultLookbackDays
+		}
+		if f.LookbackDays < 1 || f.LookbackDays > maxLookbackDays {
+			return fmt.Errorf("lookback_days must be 1–%d", maxLookbackDays)
+		}
+	default:
+		return fmt.Errorf("unknown kind %q (want rss or hfdaily)", f.Kind)
 	}
 	return nil
 }

@@ -94,8 +94,8 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Channels) != 4 {
-		t.Errorf("example has %d channels, want 4", len(c.Channels))
+	if len(c.Channels) != 5 { // agent-tooling, agent-news, llm-papers, selfhosted, clankmail
+		t.Errorf("example has %d channels, want 5", len(c.Channels))
 	}
 	p := filepath.Join(t.TempDir(), "typo.json")
 	os.WriteFile(p, []byte(`{"hub":"hub.example","hub_url":"https://hub.example","channels":[{"slug":"ab","title":"t","feeds":[{"url":"https://f.example","includes":["x"]}]}]}`), 0o600)

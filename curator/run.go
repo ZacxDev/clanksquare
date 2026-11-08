@@ -1,7 +1,8 @@
-// Package curator reposts new items from public RSS/Atom feeds into ClankMail
-// topic channels, signed with the curator's own key. Selection and formatting
-// are deterministic functions of the feeds, the config, the seen set and the
-// clock; no model is involved.
+// Package curator reposts new items from public RSS/Atom feeds (and, as
+// another source kind, Hugging Face Daily Papers) into ClankMail topic
+// channels, signed with the curator's own key. Selection and formatting are
+// deterministic functions of the fetched items, the config, the seen set and
+// the clock; no model is involved.
 package curator
 
 import (
@@ -21,7 +22,7 @@ import (
 )
 
 // Version is reported in the User-Agent.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // UserAgent is sent on every feed and hub request.
 const UserAgent = "clanksquare-curator/" + Version + " (+https://github.com/ZacxDev/clanksquare)"
@@ -51,6 +52,9 @@ type Options struct {
 	Now func() time.Time
 	// Out receives the log and the summary lines; nil means os.Stdout.
 	Out io.Writer
+
+	// Test hook: the Hugging Face API base (empty: the real one).
+	hfBase string
 
 	// afterPost, when set (tests only), runs after each successful post and
 	// its state write. A panic there simulates a crash mid-run.
@@ -513,16 +517,20 @@ func (r *runner) runChannel(ctx context.Context, ch *Channel) {
 
 	var fetched []fetchedFeed
 	for _, fc := range ch.Feeds {
-		f, err := FetchFeed(ctx, r.Client, fc.URL)
+		if fc.Disabled {
+			r.logf("INFO", "channel=%s feed %s disabled: not fetched", ch.Slug, fc.label())
+			continue
+		}
+		f, err := r.fetchSource(ctx, ch, fc)
 		if err != nil {
 			stats.FeedsFailed++
 			r.res.FeedsFailed++
-			r.logf("WARN", "channel=%s feed %s failed: %v", ch.Slug, fc.URL, err)
+			r.logf("WARN", "channel=%s feed %s failed: %v", ch.Slug, fc.label(), err)
 			continue
 		}
 		stats.FeedsOK++
 		r.res.FeedsOK++
-		r.logf("INFO", "channel=%s feed %s ok items=%d", ch.Slug, fc.URL, len(f.Items))
+		r.logf("INFO", "channel=%s feed %s ok items=%d", ch.Slug, fc.label(), len(f.Items))
 		fetched = append(fetched, fetchedFeed{fc, f})
 	}
 
@@ -586,6 +594,7 @@ type fetchedFeed struct {
 }
 
 type candidate struct {
+	feed    int    // index into the fetched feeds, for the per-feed cap
 	key     string // dedupe key: always keyFromLine(line)
 	line    string // first body line: the normalised link, or the guid
 	title   string
@@ -616,15 +625,22 @@ func selectItems(ch *Channel, feeds []fetchedFeed, seen map[string]int64, now ti
 	cutoff := now.Add(-time.Duration(ch.MaxAgeHours) * time.Hour)
 	inRun := map[string]bool{}
 	var cands []candidate
-	for _, ff := range feeds {
-		via := Truncate(PlainText(ff.cfg.Name), maxVia)
-		if via == "" {
-			via = Truncate(ff.feed.Title, maxVia)
+	for fi, ff := range feeds {
+		feedVia := Truncate(PlainText(ff.cfg.Name), maxVia)
+		if feedVia == "" {
+			feedVia = Truncate(ff.feed.Title, maxVia)
 		}
-		if via == "" {
-			via = hostOf(ff.cfg.URL)
+		if feedVia == "" {
+			feedVia = hostOf(ff.cfg.URL)
 		}
 		for _, it := range ff.feed.Items {
+			via := feedVia
+			// A source that credits each item (hfdaily) names it, over the
+			// feed's name; the rss parser never sets Source, so rss output is
+			// unchanged.
+			if src := Truncate(PlainText(it.Source), maxVia); src != "" {
+				via = src
+			}
 			st.Items++
 			switch {
 			case it.Date.IsZero() || it.Date.After(now.Add(futureSlack)):
@@ -657,7 +673,7 @@ func selectItems(ch *Channel, feeds []fetchedFeed, seen map[string]int64, now ti
 				continue
 			}
 			inRun[key] = true
-			cands = append(cands, candidate{key: key, line: line, title: it.Title, summary: it.Summary, via: via, date: it.Date})
+			cands = append(cands, candidate{feed: fi, key: key, line: line, title: it.Title, summary: it.Summary, via: via, date: it.Date})
 		}
 	}
 	st.New = len(cands)
@@ -667,6 +683,18 @@ func selectItems(ch *Channel, feeds []fetchedFeed, seen map[string]int64, now ti
 		}
 		return cands[i].key < cands[j].key
 	})
+	// Per-feed caps, newest first, before the channel cap: a feed that
+	// publishes every few minutes cannot take every slot of its channel.
+	perFeed := map[int]int{}
+	kept := cands[:0]
+	for _, c := range cands {
+		if lim := feeds[c.feed].cfg.MaxPerRun; lim > 0 && perFeed[c.feed] >= lim {
+			continue
+		}
+		perFeed[c.feed]++
+		kept = append(kept, c)
+	}
+	cands = kept
 	if len(cands) > ch.MaxPerRun {
 		cands = cands[:ch.MaxPerRun]
 	}

@@ -22,15 +22,19 @@ const (
 	maxItemsPerFeed = 1000
 )
 
-// Item is one feed entry, already reduced to plain text. Link is the raw
-// link as the feed gave it (NormalizeLink decides whether it is usable). A
-// zero Date means the item is undated.
+// Item is one entry from any source kind, already reduced to plain text.
+// Link is the raw link as the source gave it (NormalizeLink decides whether
+// it is usable and makes it canonical). A zero Date means the item is
+// undated. Author and Source are set by sources that credit each item (the
+// rss parser leaves them empty); Source, when set, is the item's "via" label.
 type Item struct {
 	GUID    string
 	Link    string
 	Title   string
 	Summary string
 	Date    time.Time
+	Author  string
+	Source  string
 }
 
 // Feed is a parsed RSS 2.0, RSS 1.0 (RDF) or Atom document.

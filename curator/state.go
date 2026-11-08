@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/ZacxDev/clanksquare/internal/hubkit"
 )
@@ -65,6 +67,7 @@ func LoadState(path string) (*State, error) {
 		if cs.Seen == nil {
 			cs.Seen = map[string]int64{}
 		}
+		cs.rekey()
 	}
 	return &s, nil
 }
@@ -78,4 +81,48 @@ func (s *State) Save(path string) error {
 		return err
 	}
 	return hubkit.WriteFileAtomic(path, append(raw, '\n'))
+}
+
+// rekey re-derives every key with the current NormalizeLink, so a key saved
+// by an older normalisation (an arXiv link with its version, before every
+// version mapped to https://arxiv.org/abs/<id>) still matches the key the same
+// item gets now. Keys that collapse into one keep the earliest first-seen
+// time; pending entries that collapse keep the one whose old key sorts
+// first. Keys are keyFromLine outputs, and NormalizeLink only ever narrows
+// what it maps (never widens what it accepts), so a link key stays a link key
+// and a guid key stays as it is.
+func (cs *ChannelState) rekey() {
+	seen := make(map[string]int64, len(cs.Seen))
+	for k, at := range cs.Seen {
+		k = rekeyOne(k)
+		if prev, ok := seen[k]; !ok || at < prev {
+			seen[k] = at
+		}
+	}
+	cs.Seen = seen
+	if len(cs.Pending) > 0 {
+		keys := make([]string, 0, len(cs.Pending))
+		for k := range cs.Pending {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		pending := make(map[string]string, len(cs.Pending))
+		for _, k := range keys {
+			nk := rekeyOne(k)
+			if _, dup := pending[nk]; !dup {
+				pending[nk] = cs.Pending[k]
+			}
+		}
+		cs.Pending = pending
+	}
+}
+
+func rekeyOne(k string) string {
+	if strings.HasPrefix(k, "guid:") {
+		return k
+	}
+	if n := NormalizeLink(k); n != "" {
+		return n
+	}
+	return k
 }

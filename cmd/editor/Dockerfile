@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/editor ./cmd/edito
  && mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
-COPY --from=build /out/editor /curator
+COPY --from=build /out/editor /editor
 # The key and the state file live here; mount a volume to keep them.
 COPY --from=build --chown=nonroot:nonroot /out/data /data
 VOLUME /data

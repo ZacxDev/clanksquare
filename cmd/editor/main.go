@@ -66,10 +66,12 @@ func run(args []string) int {
 		fs.IntVar(&o.NItems, "items", 200, "item labels to draft")
 		fs.IntVar(&o.NPairs, "pairs", 200, "pair labels to draft")
 		fs.StringVar(&o.LabelSource, "source", "llm-papers", "raw channel to sample items from")
+		fs.StringVar(&o.Skip, "skip", "", "labels JSONL whose ids are not drafted again (resume a stopped draft into a new -out file)")
 	case "eval":
 		fs.StringVar(&o.Labels, "labels", "", "labels JSONL (required)")
 		fs.Float64Var(&o.FloorF1, "floor-f1", 0, "exit 1 if any label's F1 (with support) is below this")
 		fs.Float64Var(&o.FloorPairF1, "floor-pair-f1", 0, "exit 1 if pairwise cluster F1 is below this")
+		fs.StringVar(&o.Predictions, "predictions", "", "write each item row's truth, prediction and probabilities to this JSONL file (never overwritten)")
 		fs.BoolVar(&o.HumanOnly, "human-only", false, "score only rows with a human_label (else human_label, falling back to model_label)")
 	case "agree":
 		fs.StringVar(&o.StateDir, "state", "", "state directory written by run -post: its decisions are used where it has them")

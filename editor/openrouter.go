@@ -291,13 +291,15 @@ func (m *Model) Decide(ctx context.Context, model string, state any, questions m
 	return &Decision{Model: out.Model, Answers: out.Answers}, nil
 }
 
-// Chat calls /api/v1/chat/completions and returns the assistant's text.
-func (m *Model) Chat(ctx context.Context, model, system, user string, maxTokens int) (string, error) {
+// Chat calls /api/v1/chat/completions and returns the assistant's text and
+// whether it was cut off at maxTokens (finish_reason "length").
+func (m *Model) Chat(ctx context.Context, model, system, user string, maxTokens int) (string, bool, error) {
 	var out struct {
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage usage `json:"usage"`
 	}
@@ -312,12 +314,12 @@ func (m *Model) Chat(ctx context.Context, model, system, user string, maxTokens 
 		"usage": map[string]bool{"include": true},
 	}
 	if err := m.post(ctx, "/api/v1/chat/completions", model, req, maxTokens, &out, func() float64 { return out.Usage.cost() }); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("chat: no choices")
+		return "", false, fmt.Errorf("chat: no choices")
 	}
-	return out.Choices[0].Message.Content, nil
+	return out.Choices[0].Message.Content, out.Choices[0].FinishReason == "length", nil
 }
 
 // LoadAPIKey reads the OpenRouter key from $OPENROUTER_API_KEY or, failing

@@ -2,6 +2,7 @@ package editor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -70,6 +71,9 @@ type EvalOptions struct {
 	Model     *Model
 	Labels    string
 	HumanOnly bool
+	// Predictions, if set, receives one JSON line per scored item row:
+	// {"id","truth","pred","probs"}, for sweeping thresholds offline.
+	Predictions io.Writer
 }
 
 // EvalReport is the result of eval.
@@ -152,6 +156,10 @@ func Eval(ctx context.Context, o EvalOptions) (*EvalReport, error) {
 			}
 			itemTruth = append(itemTruth, t)
 			itemPred = append(itemPred, d.Label)
+			if o.Predictions != nil {
+				raw, _ := json.Marshal(map[string]any{"id": r.ID, "truth": t, "pred": d.Label, "probs": d.Probs})
+				o.Predictions.Write(append(raw, '\n'))
+			}
 			if rep.Confusion[t] == nil {
 				rep.Confusion[t] = map[string]int{}
 			}

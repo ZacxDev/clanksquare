@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 
@@ -25,11 +26,13 @@ type CmdOpts struct {
 	NItems      int
 	NPairs      int
 	LabelSource string
+	Skip        string
 
 	Labels      string
 	FloorF1     float64
 	FloorPairF1 float64
 	HumanOnly   bool
+	Predictions string
 
 	MinPoints   int
 	MinAgeHours int
@@ -100,7 +103,18 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 			fmt.Fprintln(out, "ERROR", err)
 			return 2
 		}
-		err = LabelDraft(ctx, LabelOptions{Config: o.Config, Hub: hub, Model: model, Out: o.Out, Source: o.LabelSource, NItems: o.NItems, NPairs: o.NPairs, Log: out})
+		skip := map[string]bool{}
+		if o.Skip != "" {
+			rows, err := ReadLabels(o.Skip)
+			if err != nil {
+				fmt.Fprintln(out, "ERROR", err)
+				return 2
+			}
+			for _, r := range rows {
+				skip[r.ID] = true
+			}
+		}
+		err = LabelDraft(ctx, LabelOptions{Config: o.Config, Hub: hub, Model: model, Out: o.Out, Source: o.LabelSource, NItems: o.NItems, NPairs: o.NPairs, Skip: skip, Log: out})
 		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
 		if err != nil {
 			fmt.Fprintln(out, "ERROR", err)
@@ -117,7 +131,17 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 			fmt.Fprintln(out, "ERROR", err)
 			return 2
 		}
-		rep, err := Eval(ctx, EvalOptions{Config: o.Config, Model: model, Labels: o.Labels, HumanOnly: o.HumanOnly})
+		eo := EvalOptions{Config: o.Config, Model: model, Labels: o.Labels, HumanOnly: o.HumanOnly}
+		if o.Predictions != "" {
+			pf, err := os.OpenFile(o.Predictions, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				fmt.Fprintln(out, "ERROR", err)
+				return 2
+			}
+			defer pf.Close()
+			eo.Predictions = pf
+		}
+		rep, err := Eval(ctx, eo)
 		if err != nil {
 			fmt.Fprintln(out, "ERROR", err)
 			return 1

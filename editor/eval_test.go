@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -223,5 +224,69 @@ func TestAgreeAgainstFakeLookups(t *testing.T) {
 	// Nothing was submitted.
 	if n := f.hub.count("msg") + f.hub.count("channel"); n != 0 {
 		t.Fatalf("agree submitted %d object(s)", n)
+	}
+}
+
+func TestAgreeStopsAskingLobstersAfter429(t *testing.T) {
+	f := newRunFixture(t)
+	hn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		okJSON(w, map[string]any{"hits": []any{}})
+	}))
+	defer hn.Close()
+	var lobHits int
+	lob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lobHits++
+		w.WriteHeader(429)
+	}))
+	defer lob.Close()
+	rep, err := Agree(context.Background(), AgreeOptions{Config: f.cfg, Hub: NewHub(f.hub.srv.URL, nil), MinPoints: 100, MinAgeHours: 48,
+		Now: func() time.Time { return t0.Add(50 * time.Hour) }, HNBase: hn.URL, LobstersBase: lob.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lobHits != 1 || rep.LobstersSkipped != 2 || rep.LookupFails != 1 || rep.Checked != 3 {
+		t.Fatalf("lobsters hits=%d report=%+v", lobHits, rep)
+	}
+}
+
+func TestLabelDraftSkipResumes(t *testing.T) {
+	f := newRunFixture(t)
+	f.or.chat = func(system, user string) string {
+		data := user[strings.Index(user, "<data>")+7 : strings.Index(user, "</data>")]
+		var rows []map[string]any
+		json.Unmarshal([]byte(strings.TrimSpace(data)), &rows)
+		var out []string
+		for _, r := range rows {
+			l := "drop"
+			if strings.Contains(system, "same underlying story") {
+				l = "same"
+			}
+			out = append(out, fmt.Sprintf(`{"id":%q,"label":%q,"reason":"r"}`, r["id"], l))
+		}
+		return strings.Join(out, "\n")
+	}
+	dir := t.TempDir()
+	first, second := filepath.Join(dir, "a.jsonl"), filepath.Join(dir, "b.jsonl")
+	opts := LabelOptions{Config: f.cfg, Hub: NewHub(f.hub.srv.URL, nil), Model: f.or.model(1), Source: "llm-papers", NItems: 2, NPairs: 1, Log: io.Discard}
+	opts.Out = first
+	if err := LabelDraft(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	done, _ := ReadLabels(first)
+	opts.Out, opts.Skip = second, map[string]bool{}
+	for _, r := range done {
+		opts.Skip[r.ID] = true
+	}
+	if err := LabelDraft(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := ReadLabels(second)
+	if len(done) != 3 || len(again) != 2 { // 1 item left; 1 new pair of the 3 possible
+		t.Fatalf("first %d rows, second %d rows", len(done), len(again))
+	}
+	for _, r := range again {
+		if opts.Skip[r.ID] {
+			t.Fatalf("row %s drafted twice", r.ID)
+		}
 	}
 }

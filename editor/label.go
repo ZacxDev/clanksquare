@@ -99,10 +99,17 @@ type LabelOptions struct {
 	Source string
 	NItems int
 	NPairs int
-	Log    io.Writer
+	// Skip are row ids already labelled (a previous draft): they are not
+	// drafted again, so a stopped draft can be resumed into a new file.
+	Skip map[string]bool
+	Log  io.Writer
 }
 
 const labelBatch = 10
+
+// tokensPerRow is the output budget per labelled row. Sonnet 5.5's rows ran
+// ~50 tokens on 2026-11-08; 80 lost rows to truncation.
+const tokensPerRow = 150
 
 func sampleKey(id string) string {
 	h := sha256.Sum256([]byte("clanksquare-editor-sample\x00" + id))
@@ -165,7 +172,7 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 	// ---- items ----
 	var pool []Item
 	for _, it := range items {
-		if it.Channel == o.Source {
+		if it.Channel == o.Source && !o.Skip[it.ID] {
 			pool = append(pool, it)
 		}
 	}
@@ -190,9 +197,12 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 		}
 		raw, _ := json.Marshal(data)
 		user := "Topic: " + describe + "\n<data>\n" + string(raw) + "\n</data>"
-		text, err := o.Model.Chat(ctx, o.Config.LabelModel, itemLabelSystem, user, 80*len(batch)+100)
+		text, cut, err := o.Model.Chat(ctx, o.Config.LabelModel, itemLabelSystem, user, tokensPerRow*len(batch)+100)
 		if err != nil {
 			return fmt.Errorf("item labels (after %d rows): %w", nItems, err)
+		}
+		if cut {
+			fmt.Fprintf(o.Log, "WARN item label answer truncated at the token limit\n")
 		}
 		got := parseLabels(text, asked, Labels)
 		for _, it := range batch {
@@ -212,7 +222,7 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 	}
 
 	// ---- pairs ----
-	pairs, err := candidatePairs(ctx, o.Model, o.Config, items, o.NPairs)
+	pairs, err := candidatePairs(ctx, o.Model, o.Config, items, o.NPairs, o.Skip)
 	if err != nil {
 		return fmt.Errorf("candidate pairs: %w", err)
 	}
@@ -228,9 +238,12 @@ func LabelDraft(ctx context.Context, o LabelOptions) error {
 				"b": map[string]string{"title": p.b.Title, "excerpt": clipText(p.b.Excerpt, 300), "link": p.b.Target}})
 		}
 		raw, _ := json.Marshal(data)
-		text, err := o.Model.Chat(ctx, o.Config.LabelModel, pairLabelSystem, "<data>\n"+string(raw)+"\n</data>", 80*len(batch)+100)
+		text, cut, err := o.Model.Chat(ctx, o.Config.LabelModel, pairLabelSystem, "<data>\n"+string(raw)+"\n</data>", tokensPerRow*len(batch)+100)
 		if err != nil {
 			return fmt.Errorf("pair labels (after %d rows): %w", nPairs, err)
+		}
+		if cut {
+			fmt.Fprintf(o.Log, "WARN pair label answer truncated at the token limit\n")
 		}
 		got := parseLabels(text, asked, []string{"same", "different"})
 		for _, p := range batch {
@@ -272,7 +285,7 @@ func (p pair) id() string { return p.a.ID + "+" + p.b.ID }
 // from just below the cluster threshold (the borderline band), and a quarter
 // at random from the rest, so the labels cover both sides of the threshold.
 // Each item is in at most 3 chosen pairs.
-func candidatePairs(ctx context.Context, m *Model, cfg *Config, items []Item, n int) ([]pair, error) {
+func candidatePairs(ctx context.Context, m *Model, cfg *Config, items []Item, n int, skip map[string]bool) ([]pair, error) {
 	if n == 0 || len(items) < 2 {
 		return nil, nil
 	}
@@ -316,7 +329,7 @@ func candidatePairs(ctx context.Context, m *Model, cfg *Config, items []Item, n 
 	chosen := map[[2]int]bool{}
 	var out []pair
 	take := func(p ij) {
-		if chosen[[2]int{p.i, p.j}] || uses[p.i] >= 3 || uses[p.j] >= 3 {
+		if chosen[[2]int{p.i, p.j}] || skip[pid(p)] || uses[p.i] >= 3 || uses[p.j] >= 3 {
 			return
 		}
 		chosen[[2]int{p.i, p.j}] = true

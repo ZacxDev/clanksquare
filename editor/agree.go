@@ -56,6 +56,12 @@ type AgreeReport struct {
 	OnLobsters  int
 	MinPoints   int
 	Popular     []AgreeRow // HN points >= MinPoints
+	// TopHN are the (up to 5) items with the most HN points, whatever the
+	// threshold: the positive control that lookups can return anything.
+	TopHN []AgreeRow
+	// LobstersSkipped counts items not looked up on Lobsters because it
+	// answered 429 earlier in the run (it is not asked again after that).
+	LobstersSkipped int
 }
 
 // Counts returns how many popular items got each decision.
@@ -70,8 +76,11 @@ func (r *AgreeReport) Counts() map[string]int {
 // Write prints the report.
 func (r *AgreeReport) Write(w io.Writer) {
 	c := r.Counts()
-	fmt.Fprintf(w, "agree checked=%d lookup_failures=%d on_hn=%d on_lobsters=%d hn_points>=%d: %d (post=%d digest=%d drop=%d undecided=%d)\n",
-		r.Checked, r.LookupFails, r.OnHN, r.OnLobsters, r.MinPoints, len(r.Popular), c["post"], c["digest"], c["drop"], c[""])
+	fmt.Fprintf(w, "agree checked=%d lookup_failures=%d lobsters_skipped_after_429=%d on_hn=%d on_lobsters=%d hn_points>=%d: %d (post=%d digest=%d drop=%d undecided=%d)\n",
+		r.Checked, r.LookupFails, r.LobstersSkipped, r.OnHN, r.OnLobsters, r.MinPoints, len(r.Popular), c["post"], c["digest"], c["drop"], c[""])
+	for _, p := range r.TopHN {
+		fmt.Fprintf(w, "  top hn=%d %q %s\n", p.HN, p.Title, p.URL)
+	}
 	for _, p := range r.Popular {
 		fmt.Fprintf(w, "  hn=%d lobsters=%d decision=%s (%s) %q %s\n", p.HN, p.Lobsters, p.Decision, p.Source, p.Title, p.URL)
 	}
@@ -185,6 +194,7 @@ func Agree(ctx context.Context, o AgreeOptions) (*AgreeReport, error) {
 	now := o.Now().UnixMilli()
 	rep := &AgreeReport{MinPoints: o.MinPoints}
 	done := map[string]bool{}
+	lobstersDown := false
 	for _, it := range items {
 		age := now - it.TS
 		if it.Canon == "" || age < int64(o.MinAgeHours)*3600_000 || age > int64(o.MaxAgeHours)*3600_000 || done[it.Canon] {
@@ -197,13 +207,24 @@ func Agree(ctx context.Context, o AgreeOptions) (*AgreeReport, error) {
 			rep.LookupFails++
 			fmt.Fprintf(o.Log, "WARN hn lookup %s: %v\n", it.Canon, err)
 		}
-		lob, err := o.lobstersScore(ctx, it.Target, it.Canon)
-		if err != nil {
+		lob := 0
+		if lobstersDown {
+			rep.LobstersSkipped++
+		} else if lob, err = o.lobstersScore(ctx, it.Target, it.Canon); err != nil {
 			rep.LookupFails++
 			fmt.Fprintf(o.Log, "WARN lobsters lookup %s: %v\n", it.Canon, err)
+			if strings.Contains(err.Error(), "HTTP 429") {
+				lobstersDown = true
+				fmt.Fprintf(o.Log, "WARN lobsters rate-limited us: not asking it again this run\n")
+			}
 		}
 		if hn > 0 {
 			rep.OnHN++
+			rep.TopHN = append(rep.TopHN, AgreeRow{ItemID: it.ID, Title: it.Title, URL: it.Canon, HN: hn})
+			sort.SliceStable(rep.TopHN, func(i, j int) bool { return rep.TopHN[i].HN > rep.TopHN[j].HN })
+			if len(rep.TopHN) > 5 {
+				rep.TopHN = rep.TopHN[:5]
+			}
 		}
 		if lob > 0 {
 			rep.OnLobsters++

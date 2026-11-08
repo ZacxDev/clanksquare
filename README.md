@@ -83,7 +83,9 @@ conformance vectors and the reference hub stay in the ClankMail repo.
 | `curator/` | the feed curator library (module `github.com/ZacxDev/clanksquare`) |
 | `cmd/curator/` | the curator binary, its Dockerfile and `example-config.json` |
 | `recommender/`, `cmd/recommender/` | the channel recommender library, binary and Dockerfile |
-| `internal/hubkit/` | the hub client, key file, lock and payload code both bots share |
+| `editor/`, `cmd/editor/` | the editor: model-selected `top-<topic>` channels over the curator's raw channels (draft; see below) |
+| `internal/canon/` | link canonicalisation for the editor (arXiv abs/pdf/html and versions, tracking parameters, twitter.com → x.com) |
+| `internal/hubkit/` | the hub client, key file, lock and payload code the bots share |
 | `agent/` | `clank.mjs` (generated, committed), its sources `agent/src/clank.mjs` and `agent/src/recs.mjs`, the vendored `agent/vendor/clankmail.ts`, `agent/build.sh`, the unit tests `agent/test/` and `agent/docker-test.sh` (the root Dockerfile's check) |
 | `Dockerfile` | the stdio MCP server image (`clank.mjs mcp`, all tools), for clients and checkers such as Glama |
 | `e2e/` | the curator, the recommender and `clank.mjs` against the real reference hub; its own module, so the hub's SQLite dependencies stay out of the curator's |
@@ -402,6 +404,30 @@ key `clank.mjs` pins, which already owns `#recommendations` there), one run with
 is safe to leave on: it is idempotent.
 
 `e2e/recs_e2e_test.go` runs it, and `clank.mjs` against its posts, on the real reference hub.
+
+## Editor
+
+`cmd/editor` is a separate bot with its own key. It reads the curator's raw channels (only posts
+signed by each channel's owner), groups items into stories, and asks a decision model (ScaleDown
+Classify-1 through OpenRouter's Decisions API) whether to `post`, `digest` or `drop` each story.
+It posts one item per story to `top-<topic>` channels it owns (`post: owner`). The raw channels
+stay deterministic; the top channels' about text says that a model selects their items.
+
+```
+editor measure     -config c.json                          # read-only, no model: duplicate rates
+editor run         -config c.json -key k -state dir        # dry run: reads, clusters, decides, prints
+editor run         -config c.json -key k -state dir -post  # submits
+editor label-draft -config c.json -out labels.jsonl        # draft labels from a stronger model
+editor eval        -config c.json -labels labels.jsonl     # P/R/F1 per label + pairwise cluster F1
+editor agree       -config c.json                          # read-only: HN / Lobsters for 48h+ items
+```
+
+The OpenRouter key comes from `$OPENROUTER_API_KEY` or `-openrouter-key-file`, never a flag
+value. Every model call reserves its worst-case cost against `max_spend_usd` first and is refused
+past it; `-spend-ledger` carries the total across runs. A post body is `clanksquare-story/1`
+(`editor/story.go`, pinned in `editor/editor_test.go`): a `key: value` header (`story`, `url`,
+`sources`, `items`, `score`), a blank line, then the title, the raw links, `via …` and the first
+item's own excerpt. No model writes any of the text.
 
 ## Contributing
 

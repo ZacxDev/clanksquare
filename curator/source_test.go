@@ -2,10 +2,10 @@ package curator
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestSelectPerFeedCap(t *testing.T) {
@@ -71,53 +71,40 @@ func TestDisabledSourceNotFetched(t *testing.T) {
 	}
 }
 
-func TestNormalizeLinkMapsTwitterToX(t *testing.T) {
-	for in, want := range map[string]string{
-		"https://twitter.com/a/status/1":        "https://x.com/a/status/1",
-		"https://Mobile.Twitter.com/a/status/1": "https://x.com/a/status/1",
-		"https://www.x.com/a/status/1?utm_x=1":  "https://x.com/a/status/1",
-		"https://x.com/a/status/1":              "https://x.com/a/status/1",
-		"https://nottwitter.com/a":              "https://nottwitter.com/a",
-		"https://twitter.com.example/a":         "https://twitter.com.example/a",
-		"https://twitter.com:8443/a":            "https://twitter.com:8443/a",
+// The xsearch and discord kinds are not in this build (they live in their
+// own PR until each is verified against its real API): a config naming either
+// must fail to load, not load with the source silently skipped.
+func TestConfigRejectsXSearchAndDiscordKinds(t *testing.T) {
+	for _, feedJSON := range []string{
+		`{"kind":"xsearch","query":"MCP release"}`,
+		`{"kind":"xsearch"}`,
+		`{"kind":"xsearch","disabled":true}`,
+		`{"kind":"discord","channel_id":"123456789012345678","guild_id":"123456789012345678"}`,
+		`{"kind":"discord"}`,
+		`{"kind":"discord","disabled":true}`,
 	} {
-		if got := NormalizeLink(in); got != want {
-			t.Errorf("NormalizeLink(%q) = %q, want %q", in, got, want)
+		p := filepath.Join(t.TempDir(), "c.json")
+		cfg := `{"hub":"hub.example","hub_url":"https://hub.example","channels":[{"slug":"news","title":"t","feeds":[` + feedJSON + `]}]}`
+		if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		if got := NormalizeLink(want); got != want {
-			t.Errorf("not idempotent on %q: %q", want, got)
+		if _, err := LoadConfig(p); err == nil {
+			t.Errorf("config with feed %s loaded", feedJSON)
 		}
 	}
-}
-
-// A state file written before twitter.com mapped to x.com still dedupes the
-// same item: its keys are re-derived on load.
-func TestStateRekeysTwitterLinks(t *testing.T) {
-	w := newWorld(t)
-	w.feeds.set("/a", atomFeedXML("A", entry{id: "1", link: "https://twitter.com/a/status/1", title: "tweet", date: ago(1)}))
-	w.config(5, feed("/a"))
-	w.run() // creates the channel; posts the x.com form
-	id := ""
-	for k := range mustState(t, w).Channels {
-		id = k
+	// The bare kind (no other fields) is rejected by the kind check itself,
+	// not by the unknown-field check.
+	for _, k := range []string{"xsearch", "discord"} {
+		f := FeedConfig{Kind: k}
+		if err := f.validate(); err == nil || !strings.Contains(err.Error(), `unknown kind "`+k+`"`) {
+			t.Errorf("kind %s: %v", k, err)
+		}
 	}
-	if id == "" || len(w.hub.posts("news")) != 1 {
-		t.Fatalf("setup: %d posts", len(w.hub.posts("news")))
-	}
-	// Rewrite the state as an old binary would have: the twitter.com key.
-	old := `{"version":1,"channels":{"` + id + `":{"slug":"news","seen":{"https://twitter.com/a/status/1":1}}}}`
-	if err := os.WriteFile(w.statePath(), []byte(old), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// A later clock: a repost would sign different bytes (same-ts bytes are
-	// the same object, which the hub would just confirm).
-	w.now = w.now.Add(time.Hour)
-	w.run()
-	if n := len(w.hub.posts("news")); n != 1 {
-		t.Fatalf("%d posts: an old twitter.com seen key did not match the x.com item", n)
-	}
-	if !strings.Contains(w.out.String(), "seen=1") {
-		t.Errorf("want seen=1 in the summary")
+	// Control: the same config with an rss feed loads.
+	p := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(p, []byte(`{"hub":"hub.example","hub_url":"https://hub.example","channels":[{"slug":"news","title":"t","feeds":[{"url":"https://f.example"}]}]}`), 0o600)
+	if _, err := LoadConfig(p); err != nil {
+		t.Fatalf("control: %v", err)
 	}
 }
 

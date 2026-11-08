@@ -191,13 +191,8 @@ func TestHFDailyConfigValidation(t *testing.T) {
 		{Kind: KindHFDaily, LookbackDays: 8},
 		{Kind: KindHFDaily, LookbackDays: -1},
 		{Kind: KindHFDaily, URL: "https://huggingface.co/api/daily_papers"},
-		{Kind: KindHFDaily, Query: "agents"},
-		{Kind: KindHFDaily, LookbackHours: 24},
-		{Kind: KindHFDaily, ChannelID: testChannel},
 		{Kind: KindHFDaily, TitleFromSummary: true},
 		{Kind: KindRSS, URL: "https://x.example", LookbackDays: 2},
-		{Kind: KindXSearch, Query: "q", LookbackDays: 2},
-		{Kind: KindDiscord, ChannelID: testChannel, GuildID: testGuild, LookbackDays: 2},
 	} {
 		if err := f.validate(); err == nil {
 			t.Errorf("bad[%d] %+v validated", i, f)

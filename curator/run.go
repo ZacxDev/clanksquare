@@ -1,10 +1,8 @@
-// Package curator reposts new items from public RSS/Atom feeds (and, as other
-// source kinds, X posts found by xAI's x_search tool and Discord channel
-// messages) into ClankMail topic channels, signed with the curator's own key.
-// Selection and formatting are deterministic functions of the fetched items,
-// the config, the seen set and the clock. No model chooses or writes anything
-// except for xsearch, where Grok picks which posts to search out and reports
-// their text (see xsearch.go for what is and is not trusted from it).
+// Package curator reposts new items from public RSS/Atom feeds (and, as
+// another source kind, Hugging Face Daily Papers) into ClankMail topic
+// channels, signed with the curator's own key. Selection and formatting are
+// deterministic functions of the fetched items, the config, the seen set and
+// the clock; no model is involved.
 package curator
 
 import (
@@ -54,18 +52,9 @@ type Options struct {
 	Now func() time.Time
 	// Out receives the log and the summary lines; nil means os.Stdout.
 	Out io.Writer
-	// XAIKeyFile is a file holding the xAI API key (xsearch sources).
-	// DiscordTokenFile is a file holding the Discord bot token (discord
-	// sources). Secrets are only ever read from files, never from flags.
-	XAIKeyFile       string
-	DiscordTokenFile string
 
-	// Test hooks: API bases (empty: the real ones) and the sleeper used for
-	// Discord rate limits (nil: a context-aware sleep).
-	xaiBase     string
-	discordBase string
-	hfBase      string
-	sleep       func(context.Context, time.Duration) error
+	// Test hook: the Hugging Face API base (empty: the real one).
+	hfBase string
 
 	// afterPost, when set (tests only), runs after each successful post and
 	// its state write. A panic there simulates a crash mid-run.
@@ -121,10 +110,6 @@ type runner struct {
 	blocked map[string]bool
 	// tried holds pending keys already resent this run.
 	tried map[string]bool
-	// secrets read from files this run, by path ("" until read).
-	secrets map[string]string
-	// spend is the xsearch spend ledger, loaded on first use.
-	spend *spendLedger
 }
 
 func (r *runner) logf(level, format string, args ...any) {
@@ -150,10 +135,7 @@ func Run(ctx context.Context, opts Options) *Result {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
-	if opts.sleep == nil {
-		opts.sleep = sleepCtx
-	}
-	r := &runner{Options: opts, res: &Result{}, blocked: map[string]bool{}, tried: map[string]bool{}, secrets: map[string]string{}}
+	r := &runner{Options: opts, res: &Result{}, blocked: map[string]bool{}, tried: map[string]bool{}}
 	r.hub = hubkit.Client{Base: opts.Config.HubURL, HTTP: opts.Client, UserAgent: UserAgent}
 	r.me = clankmail.KeyID(opts.Key.Public().(ed25519.PublicKey))
 	r.logf("INFO", "curator %s key=%s hub=%s dry_run=%v", Version, r.me, opts.Config.HubURL, opts.DryRun)
@@ -540,11 +522,6 @@ func (r *runner) runChannel(ctx context.Context, ch *Channel) {
 			continue
 		}
 		f, err := r.fetchSource(ctx, ch, fc)
-		var skip *skipError
-		if errors.As(err, &skip) {
-			r.logf(skip.level, "channel=%s feed %s skipped: %s", ch.Slug, fc.label(), skip.msg)
-			continue
-		}
 		if err != nil {
 			stats.FeedsFailed++
 			r.res.FeedsFailed++
@@ -658,9 +635,9 @@ func selectItems(ch *Channel, feeds []fetchedFeed, seen map[string]int64, now ti
 		}
 		for _, it := range ff.feed.Items {
 			via := feedVia
-			// A source that credits each item (a Discord follower webhook's
-			// name, an X handle) names it, over the feed's name; the rss
-			// parser never sets Source, so rss output is unchanged.
+			// A source that credits each item (hfdaily) names it, over the
+			// feed's name; the rss parser never sets Source, so rss output is
+			// unchanged.
 			if src := Truncate(PlainText(it.Source), maxVia); src != "" {
 				via = src
 			}

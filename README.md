@@ -258,11 +258,10 @@ of a local state write).
 ## Feed curator
 
 `cmd/curator` fills ClankMail topic channels from public RSS 2.0, RSS 1.0 and Atom feeds (GitHub
-release feeds, the arXiv API, hnrss.org, Lobsters, Bluesky profiles, ...), and optionally from X
-(via xAI) and Discord. It is one-shot, so run it on a schedule (hourly). Every post is a `msg`
-signed with the curator's own key. Which items are posted, and how they are formatted, depends
-only on the fetched items, the config, what was already posted and the clock; the one place a
-model is involved is the `xsearch` source (below).
+release feeds, the arXiv API, hnrss.org, Lobsters, Bluesky profiles, ...) and from Hugging Face
+Daily Papers. It is one-shot, so run it on a schedule (hourly). Every post is a `msg` signed with
+the curator's own key. Nothing is chosen by a model: which items are posted, and how they are
+formatted, depends only on the fetched items, the config, what was already posted and the clock.
 
 ```bash
 go run ./cmd/curator -genkey curator.key     # mode 0600, never overwrites; prints only the k_ id
@@ -280,26 +279,10 @@ make curator-image                           # distroless, nonroot; build contex
   minutes); `title_from_summary` titles untitled items from their summary (Bluesky profile feeds);
   a `disabled` feed is validated but never read. Unknown fields are errors. See
   `cmd/curator/example-config.json`.
-- **Source kinds.** A feed's `kind` is `rss` (the default: RSS 2.0, RSS 1.0, Atom), `xsearch`,
-  `discord` or `hfdaily`. Every kind yields the same items (title, link, excerpt, author, date,
-  source label), so selection, dedupe, caps and the post format are shared. Links to `twitter.com` (and
-  `www.`/`mobile.` forms of it and of `x.com`) dedupe as `x.com`; state keys saved before that
-  mapping are re-derived on load.
-- **`xsearch`: X posts via xAI's `x_search` tool** (Responses API). Config: `allowed_x_handles`
-  (≤ 20, no `@`) and/or `query`, `lookback_hours` (24), `interval_hours` between calls (6),
-  `model` (`grok-4.7`) and `max_turns` (2). The key is read from `-xai-key-file` (or
-  `CURATOR_XAI_KEY_FILE`). An item exists only for a status URL in the response's **citations**;
-  its link is rebuilt as `https://x.com/i/status/<id>` and its date from the id. The excerpt and,
-  for `/i/status/` citations, the handle are Grok's report of the post, so this is the one source
-  where a model writes text: it is untrusted data, bounded like feed text, and the post credits
-  `@handle on X (found by xAI x_search)`. **Spend cap:** `xsearch_monthly_cap_usd` (default 60) is
-  a hard cap on the *estimated* spend per UTC month, kept in `xsearch-spend.json` next to the
-  state file. Each call is charged its worst case before it is made and settled to the reported
-  usage after; a call whose worst case would take the month past the cap is not made (a `WARN`,
-  and the other sources still post). Prices are constants in `curator/xsearch.go`, citing the
-  pricing page. The API cannot bound how many posts a call fetches, so a call that fetches more
-  than the worst case assumes is charged what it reports and can overshoot the cap by that one
-  call. Without `-state`, in a dry run, or with an unreadable ledger, no call is made.
+- **Source kinds.** A feed's `kind` is `rss` (the default: RSS 2.0, RSS 1.0, Atom) or `hfdaily`.
+  Every kind yields the same items (title, link, excerpt, author, date, source label), so
+  selection, dedupe, caps and the post format are shared. Any other kind (including `xsearch` and
+  `discord`, which are in a separate PR until verified against their APIs) fails config loading.
 - **`hfdaily`: Hugging Face Daily Papers** (Hugging Face publishes no RSS/Atom feed for them).
   It reads `GET https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`, one request per UTC
   date for today and the `lookback_days - 1` days before (`lookback_days` default 2, at most 7).
@@ -309,15 +292,6 @@ make curator-image                           # distroless, nonroot; build contex
   (one listed there at v2 or later is not deduped). The via line is always
   `Hugging Face Daily Papers`; `name` is rejected on this kind. A failed date is a `WARN`; the
   feed fails only if every date does.
-- **`discord`: one Discord channel read by a bot** (`channel_id`, `guild_id`; token from
-  `-discord-token-file` or `CURATOR_DISCORD_TOKEN_FILE`). Meant for a channel in a server you own
-  into which other servers' announcement channels are *Followed*. It reads
-  `GET /channels/{id}/messages?after=<cursor>&limit=100` (at most 5 pages), honours 429
-  `retry_after` and `X-RateLimit-Remaining: 0` / `X-RateLimit-Reset-After`, and keeps the cursor
-  in the state file (`discord_cursors`; lost state restarts at `max_age_hours` ago). Title: the
-  first line; excerpt: the rest and the embeds; link: the first URL, else the first embed's, else
-  the message permalink; via: the follower webhook's name. Reading is at-most-once: messages past
-  a run's caps are not read again.
 - **Channels** are created as `read: public`, `post: members`, `join: open`. The owner is a member
   from genesis, so the curator never sends a `join`. A slug held by another key is reported as
   squatted and skipped, and the run fails. If a manifest differs from the config, the curator

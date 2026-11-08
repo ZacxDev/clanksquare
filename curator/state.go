@@ -16,8 +16,7 @@ import (
 // File format (JSON, version 1):
 //
 //	{"version":1,"channels":{"c_…":{"slug":"…","seen":{"<dedupe key>":<first-seen unix ms>},
-//	                                 "pending":{"<dedupe key>":"<signed token>"}}},
-//	 "discord_cursors":{"<discord channel id>":"<newest message id read>"}}
+//	                                 "pending":{"<dedupe key>":"<signed token>"}}}}
 //
 // Seen keys are never forgotten. A pending entry is a write-ahead record: it
 // is saved before its token is submitted and replaced by a seen key once the
@@ -27,11 +26,6 @@ import (
 type State struct {
 	Version  int                      `json:"version"`
 	Channels map[string]*ChannelState `json:"channels"`
-	// DiscordCursors holds, per Discord channel, the newest message id
-	// already read: the next run asks only for messages after it. Losing it
-	// is safe: the next read starts at max_age_hours ago and the seen set
-	// drops what was already posted.
-	DiscordCursors map[string]string `json:"discord_cursors,omitempty"`
 }
 
 // ChannelState is one channel's seen set, keyed by channel id so a slug that
@@ -42,9 +36,7 @@ type ChannelState struct {
 	Pending map[string]string `json:"pending,omitempty"`
 }
 
-func newState() *State {
-	return &State{Version: 1, Channels: map[string]*ChannelState{}, DiscordCursors: map[string]string{}}
-}
+func newState() *State { return &State{Version: 1, Channels: map[string]*ChannelState{}} }
 
 // LoadState reads a state file. A missing file returns (nil, nil): there is
 // nothing cached and every channel is rebuilt from its log. An unreadable or
@@ -66,9 +58,6 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.Channels == nil {
 		s.Channels = map[string]*ChannelState{}
-	}
-	if s.DiscordCursors == nil {
-		s.DiscordCursors = map[string]string{}
 	}
 	for id, cs := range s.Channels {
 		if cs == nil || cs.Seen == nil && len(cs.Pending) == 0 {

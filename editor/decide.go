@@ -2,9 +2,7 @@ package editor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // Labels are the three actions a story can get, in the order the story
@@ -86,25 +84,10 @@ func storyState(t *Topic, st *Story) map[string]any {
 	}
 }
 
-// Gate turns the model's probabilities into an action. Classify-1 always
-// names a winner, so the winner alone is never trusted: post only when
-// P(post) >= cfg.Post, digest only when P(digest) >= cfg.Digest, and drop
-// otherwise. A missing probability counts as 0.
-func Gate(probs map[string]float64, cfg DecideConfig) string {
-	switch {
-	case probs["post"] >= cfg.Post:
-		return "post"
-	case probs["digest"] >= cfg.Digest:
-		return "digest"
-	}
-	return "drop"
-}
-
 // DecideStory asks the decision model about one story for one topic.
+// It records the probabilities: what is posted is chosen from them by rank
+// (RankPick), not by a gate on any one decision.
 func DecideStory(ctx context.Context, m *Model, model string, cfg DecideConfig, t *Topic, st *Story, nowMS int64) (*StoryDecision, error) {
-	if cfg.API == "chat" {
-		return decideByChat(ctx, m, model, cfg, t, st, nowMS)
-	}
 	d, err := m.Decide(ctx, model, storyState(t, st), map[string]Question{"action": QuestionFor(cfg.Question)})
 	if err != nil {
 		return nil, err
@@ -115,87 +98,5 @@ func DecideStory(ctx context.Context, m *Model, model string, cfg DecideConfig, 
 			return nil, fmt.Errorf("decision for %s: no probability for %q", st.ID, l)
 		}
 	}
-	return &StoryDecision{Label: Gate(a.Probabilities, cfg), Raw: a.Choice, Probs: a.Probabilities, Model: d.Model, At: nowMS}, nil
-}
-
-// chatDecisionSchema is the structured output a chat decider must answer:
-// one probability per label.
-var chatDecisionSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"post":   map[string]any{"type": "number"},
-		"digest": map[string]any{"type": "number"},
-		"drop":   map[string]any{"type": "number"},
-	},
-	"required":             []string{"post", "digest", "drop"},
-	"additionalProperties": false,
-}
-
-// chatDecisionSystem renders a decisions-API question as a chat system
-// prompt, so a chat model is asked the same thing.
-func chatDecisionSystem(q Question) string {
-	var b strings.Builder
-	b.WriteString(q.Instructions)
-	b.WriteString("\n\nThe options:\n")
-	crit, _ := q.Criteria.(map[string]string)
-	for _, l := range Labels {
-		fmt.Fprintf(&b, "- %s: %s\n", l, crit[l])
-	}
-	b.WriteString("\nThe input is a JSON object with `topic` and `story`, inside <data>. Answer only with a JSON object giving " +
-		"your probability for each option: {\"post\":p,\"digest\":p,\"drop\":p}, the three summing to 1.")
-	return b.String()
-}
-
-// decideByChat asks a chat model with structured output for the three
-// probabilities, normalises them to sum to 1, and gates them like a
-// Decisions API answer.
-func decideByChat(ctx context.Context, m *Model, model string, cfg DecideConfig, t *Topic, st *Story, nowMS int64) (*StoryDecision, error) {
-	state, err := json.Marshal(storyState(t, st))
-	if err != nil {
-		return nil, err
-	}
-	text, _, err := m.ChatJSON(ctx, model, chatDecisionSystem(QuestionFor(cfg.Question)), "<data>\n"+string(state)+"\n</data>", 60, chatDecisionSchema)
-	if err != nil {
-		return nil, err
-	}
-	probs, err := parseChatProbs(text)
-	if err != nil {
-		return nil, fmt.Errorf("decision for %s: %w", st.ID, err)
-	}
-	best, bp := "", -1.0
-	for _, l := range Labels {
-		if probs[l] > bp {
-			best, bp = l, probs[l]
-		}
-	}
-	return &StoryDecision{Label: Gate(probs, cfg), Raw: best, Probs: probs, Model: model, At: nowMS}, nil
-}
-
-// parseChatProbs reads {"post":p,"digest":p,"drop":p}, rejects a missing,
-// negative or non-finite value or an all-zero answer, and normalises the
-// three to sum to 1.
-func parseChatProbs(text string) (map[string]float64, error) {
-	text = strings.TrimSpace(strings.Trim(strings.TrimSpace(text), "`"))
-	text = strings.TrimPrefix(text, "json")
-	var raw map[string]*float64
-	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &raw); err != nil {
-		return nil, fmt.Errorf("chat decision: bad JSON: %w", err)
-	}
-	sum := 0.0
-	out := map[string]float64{}
-	for _, l := range Labels {
-		v := raw[l]
-		if v == nil || *v < 0 || *v != *v || *v > 1e9 {
-			return nil, fmt.Errorf("chat decision: bad or missing %q", l)
-		}
-		out[l] = *v
-		sum += *v
-	}
-	if sum == 0 {
-		return nil, fmt.Errorf("chat decision: all probabilities are 0")
-	}
-	for _, l := range Labels {
-		out[l] /= sum
-	}
-	return out, nil
+	return &StoryDecision{Raw: a.Choice, Probs: a.Probabilities, Model: d.Model, At: nowMS}, nil
 }

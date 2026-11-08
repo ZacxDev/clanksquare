@@ -189,134 +189,66 @@ func TestTruthCacheRelabelsAndRetriesUnknown(t *testing.T) {
 	}
 }
 
-// evalCLIFixture writes a labels file whose model labels and popularity
-// truth disagree everywhere, and returns options for Command("eval").
+// evalCLIFixture: two stories with popularity truth, Hot (truth post) and
+// Cold (truth drop), decided from the hub window. With agreeWithTruth the
+// decider gives Hot the higher P(post), else Cold. k = 1 per UTC day.
 func evalCLIFixture(t *testing.T, agreeWithTruth bool) (CmdOpts, *fakeOR) {
-	or := newFakeOR(t)
-	or.probs["Hot"] = map[string]float64{"post": 0.9, "digest": 0.05, "drop": 0.05}
-	or.probs["Cold"] = map[string]float64{"post": 0.1, "digest": 0.1, "drop": 0.8}
-	cfg := &Config{HubURL: "https://hub.example", Sources: []string{"llm-papers"}, OpenRouterURL: or.srv.URL,
-		Topics: []Topic{{Slug: "top-llm-papers", Title: "T", Describe: "d", From: []string{"llm-papers"}, About: "model operator"}}}
-	cfg.Defaults()
-	// The model labels say the decider is right (axis 2 perfect); the
-	// truth says it is exactly wrong, unless agreeWithTruth.
-	hot, cold := "drop", "post"
+	f := newRunFixture(t)
+	hot := rawPost(t, f.hub, f.curator, f.rawID, "Hot", "https://arxiv.org/abs/2610.00011v1", "Hot.", ms(-5*time.Hour))
+	cold := rawPost(t, f.hub, f.curator, f.rawID, "Cold", "https://arxiv.org/abs/2610.00012v1", "Cold.", ms(-4*time.Hour))
+	hp, cp := 0.1, 0.9
 	if agreeWithTruth {
-		hot, cold = "post", "drop"
+		hp, cp = 0.9, 0.1
 	}
-	labels := writeLabels(t,
-		LabelRow{ID: "m_1", Kind: "item", Channel: "llm-papers", Title: "Hot", ModelLabel: "post"},
-		LabelRow{ID: "m_2", Kind: "item", Channel: "llm-papers", Title: "Cold", ModelLabel: "drop"},
-	)
-	if agreeWithTruth { // and now axis 2 is exactly wrong
-		labels = writeLabels(t,
-			LabelRow{ID: "m_1", Kind: "item", Channel: "llm-papers", Title: "Hot", ModelLabel: "drop"},
-			LabelRow{ID: "m_2", Kind: "item", Channel: "llm-papers", Title: "Cold", ModelLabel: "post"},
-		)
+	f.or.probs["Hot"] = map[string]float64{"post": hp, "digest": 0, "drop": 1 - hp}
+	f.or.probs["Cold"] = map[string]float64{"post": cp, "digest": 0, "drop": 1 - cp}
+	// The run fixture's A, B, C (no truth) rank below both, so they never
+	// take the day's one pick.
+	for i, title := range []string{"Paper A", "Paper B", "Paper C"} {
+		p := 0.05 - 0.01*float64(i)
+		f.or.probs[title] = map[string]float64{"post": p, "digest": 0, "drop": 1 - p}
 	}
+	f.cfg.Decide.TopKPerDay = 1
+	f.cfg.OpenRouterURL = f.or.srv.URL
 	v1, v2 := 50, 2
 	truth := filepath.Join(t.TempDir(), "truth.json")
 	raw, _ := json.Marshal([]TruthRow{
-		{ID: "m_1", Channel: "llm-papers", Signal: SignalHF, Value: &v1, Label: hot},
-		{ID: "m_2", Channel: "llm-papers", Signal: SignalHF, Value: &v2, Label: cold},
+		{ID: hot, Channel: "llm-papers", URL: "https://arxiv.org/abs/2610.00011", Signal: SignalHF, Value: &v1, Label: "post"},
+		{ID: cold, Channel: "llm-papers", URL: "https://arxiv.org/abs/2610.00012", Signal: SignalHF, Value: &v2, Label: "drop"},
 	})
 	os.WriteFile(truth, raw, 0o600)
 	key := filepath.Join(t.TempDir(), "key")
 	os.WriteFile(key, []byte("test-key\n"), 0o600)
 	t.Setenv("OPENROUTER_API_KEY", "")
-	return CmdOpts{Config: cfg, KeyFile: key, Labels: labels, Truth: truth, HTTP: or.srv.Client(),
-		FloorAUC: 0.6, FloorPrecisionPost: 0.5, FloorRecallPopular: 0.5}, or
+	return CmdOpts{Config: f.cfg, KeyFile: key, Truth: truth, HTTP: f.hub.srv.Client(), Now: func() time.Time { return t0 },
+		FloorAUC: 0.6, FloorPrecisionAtK: 0.5, FloorRecallPopular: 0.5}, f.or
 }
 
-// TestEvalExitCodeIsAxis1Only: eval fails when the decisions miss the
-// popularity truth even though they match the model labels perfectly, and
-// passes when they meet the truth even though they miss every model label.
+// TestEvalExitCodeIsAxis1Only: eval's exit status follows the floors on the
+// rank pick against the popularity truth (the only axis left): it fails when
+// the decider ranks the truth-popular story below the unpopular one, passes
+// when it ranks it above, and a floor cannot be met without -truth.
 func TestEvalExitCodeIsAxis1Only(t *testing.T) {
 	o, _ := evalCLIFixture(t, false)
 	var out bytes.Buffer
 	if code := Command(context.Background(), "eval", o, &out); code != 1 {
-		t.Fatalf("decider wrong on truth, right on model labels: exit %d, want 1\n%s", code, out.String())
+		t.Fatalf("decider wrong on truth: exit %d, want 1\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "FAIL axis 1: AUC 0.000 < floor 0.600") || !strings.Contains(out.String(), "axis2 label=post support=1 precision=1.000 recall=1.000") {
+	if !strings.Contains(out.String(), "FAIL eval: AUC 0.000 < floor 0.600") || !strings.Contains(out.String(), "FAIL eval: precision@k 0.000 < floor 0.500") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	o, _ = evalCLIFixture(t, true)
 	out.Reset()
 	if code := Command(context.Background(), "eval", o, &out); code != 0 {
-		t.Fatalf("decider right on truth, wrong on model labels: exit %d, want 0\n%s", code, out.String())
+		t.Fatalf("decider right on truth: exit %d, want 0\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "auc=1.000 precision_at_post=1.000 recall_popular=1.000") || strings.Contains(out.String(), "FAIL") {
+	if !strings.Contains(out.String(), "precision_at_k=1.000 recall_popular=1.000 auc=1.000") || strings.Contains(out.String(), "FAIL") {
 		t.Fatalf("output:\n%s", out.String())
 	}
 	// Without -truth, a floor cannot be met.
 	o.Truth = ""
 	out.Reset()
-	if code := Command(context.Background(), "eval", o, &out); code != 1 || !strings.Contains(out.String(), "no item has a popularity truth label") {
+	if code := Command(context.Background(), "eval", o, &out); code != 1 || !strings.Contains(out.String(), "no story has a popularity truth label") {
 		t.Fatalf("no truth: exit %d\n%s", code, out.String())
-	}
-}
-
-func TestChatDeciderUsesStructuredOutputAndGates(t *testing.T) {
-	or := newFakeOR(t)
-	or.chat = func(system, user string) string {
-		if !strings.Contains(system, "About one item in eight") || !strings.Contains(user, "<data>") {
-			return "{}"
-		}
-		if strings.Contains(user, "Hot") {
-			return `{"post": 1.4, "digest": 0.4, "drop": 0.2}` // normalised: 0.7 0.2 0.1
-		}
-		return `{"post": 0.5, "digest": 0.3}`
-	}
-	cfg := DecideConfig{Post: 0.6, Digest: 0.5, Question: "v2", API: "chat"}
-	topic := &Topic{Describe: "d"}
-	m := or.model(1)
-	d, err := DecideStory(context.Background(), m, "deepseek/deepseek-v4.1-flash", cfg, topic, &Story{ID: "s_1", Items: []StoryItem{{Title: "Hot"}}}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Label != "post" || d.Probs["post"] < 0.6999 || d.Probs["post"] > 0.7001 || d.Probs["drop"] < 0.0999 || d.Probs["drop"] > 0.1001 {
-		t.Fatalf("decision: %+v", d)
-	}
-	body := or.bodies[len(or.bodies)-1]
-	rf, _ := body["response_format"].(map[string]any)
-	if rf["type"] != "json_schema" || body["reasoning"].(map[string]any)["enabled"] != false {
-		t.Fatalf("request: %v", body)
-	}
-	if _, err := DecideStory(context.Background(), m, "deepseek/deepseek-v4.1-flash", cfg, topic, &Story{ID: "s_2", Items: []StoryItem{{Title: "Cold"}}}, 0); err == nil || !strings.Contains(err.Error(), `missing "drop"`) {
-		t.Fatalf("missing probability: %v", err)
-	}
-}
-
-func TestLabelDraftOnlyRedraftsTheSameRows(t *testing.T) {
-	f := newRunFixture(t)
-	items, _ := ReadSources(context.Background(), NewHub(f.hub.srv.URL, nil), f.cfg, &bytes.Buffer{})
-	a, c := items[0].ID, items[2].ID
-	only := map[string]bool{c: true, a + "+" + c: true, "m_gone+" + a: true}
-	out := filepath.Join(t.TempDir(), "x.jsonl")
-	f.or.chat = func(system, user string) string {
-		data := user[strings.Index(user, "<data>")+7 : strings.Index(user, "</data>")]
-		var rows []map[string]any
-		json.Unmarshal([]byte(strings.TrimSpace(data)), &rows)
-		l := "drop"
-		if strings.Contains(system, "same underlying story") {
-			l = "same"
-		}
-		var o []string
-		for _, r := range rows {
-			o = append(o, fmt.Sprintf(`{"id":%q,"label":%q,"reason":"r"}`, r["id"], l))
-		}
-		return strings.Join(o, "\n")
-	}
-	if err := LabelDraft(context.Background(), LabelOptions{Config: f.cfg, Hub: NewHub(f.hub.srv.URL, nil), Model: f.or.model(1),
-		Out: out, Source: "llm-papers", NItems: 10, NPairs: 10, Only: only, Log: &bytes.Buffer{}}); err != nil {
-		t.Fatal(err)
-	}
-	rows, _ := ReadLabels(out)
-	var ids []string
-	for _, r := range rows {
-		ids = append(ids, r.ID)
-	}
-	if strings.Join(ids, ",") != c+","+a+"+"+c {
-		t.Fatalf("rows %v", ids)
 	}
 }

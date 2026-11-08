@@ -23,7 +23,7 @@ type RunOptions struct {
 	// StateDir holds state.json and its lock. Required with Post.
 	StateDir string
 	// Post submits to the hub. Without it the run is a dry run: it reads,
-	// clusters and decides (model calls are made and metered), prints what
+	// groups and decides (model calls are made and metered), prints what
 	// it would post, and submits nothing and writes no state.
 	Post bool
 	// Preview is an unattended dry run that keeps its own state: it submits
@@ -49,9 +49,6 @@ type RunOptions struct {
 type TopicStats struct {
 	Slug    string
 	Decided int
-	Post    int
-	Digest  int
-	Drop    int
 	// Eligible: stories in the pick window, decided, not yet posted.
 	Eligible int
 	// Today: posted (or, in a preview, picked) earlier in this UTC day,
@@ -171,17 +168,10 @@ func Run(ctx context.Context, o RunOptions) *Result {
 		}
 	}
 	r.res.Items = len(recent)
-	cl := &Clusterer{Cfg: o.Config.Cluster, Model: o.Model, EmbedModel: o.Config.EmbedModel,
-		DecisionModel: o.Config.DecisionModel, State: r.state, Log: o.Out}
-	created, err := cl.Assign(ctx, recent)
+	cl := &Clusterer{Cfg: o.Config.Cluster, State: r.state, Log: o.Out}
+	created := cl.Assign(recent)
 	r.res.NewStories = len(created)
-	if err != nil {
-		r.fail("clustering: %v", err)
-		r.saveState() // keep what was assigned before the error
-		return r.res
-	}
-	cl.Close(r.nowMS())
-	r.logf("INFO", "items=%d (last %dh) new_stories=%d stories=%d same_story_asked=%d", len(recent), o.Config.MaxAgeHours, len(created), len(r.state.Stories), cl.SameStoryAsked)
+	r.logf("INFO", "items=%d (last %dh) new_stories=%d stories=%d", len(recent), o.Config.MaxAgeHours, len(created), len(r.state.Stories))
 
 	r.resolveAll()
 	for i := range o.Config.Topics {
@@ -198,8 +188,8 @@ func Run(ctx context.Context, o RunOptions) *Result {
 		}
 	}
 	for _, t := range r.res.Topics {
-		fmt.Fprintf(r.Out, "topic=%s decided=%d post=%d digest=%d drop=%d eligible=%d today=%d budget=%d posted=%d\n",
-			t.Slug, t.Decided, t.Post, t.Digest, t.Drop, t.Eligible, t.Today, t.Budget, t.Posted)
+		fmt.Fprintf(r.Out, "topic=%s decided=%d eligible=%d today=%d budget=%d posted=%d\n",
+			t.Slug, t.Decided, t.Eligible, t.Today, t.Budget, t.Posted)
 	}
 	if r.Preview {
 		r.previewSummary()
@@ -297,18 +287,8 @@ func (r *runner) runTopic(ctx context.Context, t *Topic, cutoff int64) {
 		}
 		st.Decisions[t.Slug] = d
 		ts.Decided++
-		r.logf("INFO", "topic=%s story=%s label=%s raw=%s post=%.3f digest=%.3f drop=%.3f model=%s %q",
-			t.Slug, sid, d.Label, d.Raw, d.Probs["post"], d.Probs["digest"], d.Probs["drop"], d.Model, st.Items[0].Title)
-	}
-	for _, sid := range ids {
-		switch r.state.Stories[sid].Decisions[t.Slug].labelOr("") {
-		case "post":
-			ts.Post++
-		case "digest":
-			ts.Digest++
-		case "drop":
-			ts.Drop++
-		}
+		r.logf("INFO", "topic=%s story=%s raw=%s post=%.3f digest=%.3f drop=%.3f model=%s %q",
+			t.Slug, sid, d.Raw, d.Probs["post"], d.Probs["digest"], d.Probs["drop"], d.Model, st.Items[0].Title)
 	}
 	r.saveState()
 
@@ -320,7 +300,7 @@ func (r *runner) runTopic(ctx context.Context, t *Topic, cutoff int64) {
 	ts.Eligible = len(cands)
 	ts.Today = PostedToday(cs, r.Now())
 	ts.Budget = r.Config.Decide.TopKPerDay
-	picks := RankPick(cands, min(ts.Budget-ts.Today, t.MaxPerRun), r.Config.Decide.MinPPost)
+	picks := RankPick(cands, ts.Budget-ts.Today, r.Config.Decide.MinPPost)
 	r.logf("INFO", "topic=%s eligible=%d posted_today=%d budget=%d min_p_post=%.3f picks=%d", t.Slug, len(cands), ts.Today, ts.Budget, r.Config.Decide.MinPPost, len(picks))
 	if r.Preview {
 		picked := map[string]bool{}
@@ -408,13 +388,6 @@ func (r *runner) candidates(t *Topic, cs *ChannelState) (eligible []Candidate, r
 		ranked = append(ranked, c.Story)
 	}
 	return eligible, ranked
-}
-
-func (d *StoryDecision) labelOr(def string) string {
-	if d == nil {
-		return def
-	}
-	return d.Label
 }
 
 // Channel policy for top channels: anyone may read and join, only the

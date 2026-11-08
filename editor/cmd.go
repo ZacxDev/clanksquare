@@ -23,28 +23,17 @@ type CmdOpts struct {
 	Post     bool // run: submit for real
 	Preview  bool // run: unattended dry run that keeps its decisions and picks (RunOptions.Preview)
 
-	Out         string
-	NItems      int
-	NPairs      int
-	LabelSource string
-	Skip        string
-
-	Labels      string
-	FloorF1     float64
-	HumanOnly   bool
-	Predictions string
-
-	Truth              string // eval: popularity truth file (editor truth's cache)
-	Refresh            bool   // truth: look up rows already labelled
-	FloorAUC           float64
-	FloorPrecisionPost float64
+	Truth              string  // eval: popularity truth file (editor truth's cache)
+	Refresh            bool    // truth: look up rows already labelled
+	PreviewDir         string  // eval: score run -preview's files instead of deciding the hub window
+	SinceHours         int     // eval: the hub window's age limit
+	Predictions        string  // eval: per-story JSONL output
+	FloorAUC           float64 // eval floors
+	FloorPrecisionAtK  float64
 	FloorRecallPopular float64
-	OnlyIDs            string // label-draft: draft only the item ids of this labels file
 
-	MinPoints   int
-	MinAgeHours int
-	MaxAgeHours int
-	NoDecide    bool
+	// Now is eval's clock (the hub window's age limit); nil means time.Now.
+	Now func() time.Time
 
 	// HTTP is used for every request; nil means a default client.
 	HTTP *http.Client
@@ -100,57 +89,17 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 		res := Run(ctx, RunOptions{Config: o.Config, Key: key, StateDir: o.StateDir, Post: o.Post, Preview: o.Preview, Hub: hub, Model: model, Out: out})
 		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
 		return res.ExitCode()
-	case "label-draft":
-		if o.Out == "" {
-			fmt.Fprintln(out, "ERROR label-draft: -out is required")
-			return 2
-		}
-		model, err := newModel()
-		if err != nil {
-			fmt.Fprintln(out, "ERROR", err)
-			return 2
-		}
-		var only map[string]bool
-		if o.OnlyIDs != "" {
-			rows, err := ReadLabels(o.OnlyIDs)
-			if err != nil {
-				fmt.Fprintln(out, "ERROR", err)
-				return 2
-			}
-			only = map[string]bool{}
-			for _, r := range rows {
-				only[r.ID] = true
-			}
-		}
-		skip := map[string]bool{}
-		if o.Skip != "" {
-			rows, err := ReadLabels(o.Skip)
-			if err != nil {
-				fmt.Fprintln(out, "ERROR", err)
-				return 2
-			}
-			for _, r := range rows {
-				skip[r.ID] = true
-			}
-		}
-		err = LabelDraft(ctx, LabelOptions{Config: o.Config, Hub: hub, Model: model, Out: o.Out, Source: o.LabelSource, NItems: o.NItems, NPairs: o.NPairs, Skip: skip, Only: only, Log: out})
-		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
-		if err != nil {
-			fmt.Fprintln(out, "ERROR", err)
-			return 1
-		}
-		return 0
 	case "eval":
-		if o.Labels == "" {
-			fmt.Fprintln(out, "ERROR eval: -labels is required")
-			return 2
+		eo := EvalOptions{Config: o.Config, PreviewDir: o.PreviewDir, Hub: hub, SinceHours: o.SinceHours, Now: o.Now, Log: out}
+		var model *Model
+		if o.PreviewDir == "" {
+			m, err := newModel()
+			if err != nil {
+				fmt.Fprintln(out, "ERROR", err)
+				return 2
+			}
+			model, eo.Model = m, m
 		}
-		model, err := newModel()
-		if err != nil {
-			fmt.Fprintln(out, "ERROR", err)
-			return 2
-		}
-		eo := EvalOptions{Config: o.Config, Model: model, Labels: o.Labels, HumanOnly: o.HumanOnly}
 		if o.Truth != "" {
 			tr, err := ReadTruth(o.Truth)
 			if err != nil {
@@ -169,13 +118,15 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 			eo.Predictions = pf
 		}
 		rep, err := Eval(ctx, eo)
+		if model != nil {
+			defer fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
+		}
 		if err != nil {
 			fmt.Fprintln(out, "ERROR", err)
 			return 1
 		}
 		rep.Write(out)
-		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
-		if fails := rep.BelowFloors(Floors{F1: o.FloorF1, AUC: o.FloorAUC, PrecisionPost: o.FloorPrecisionPost, RecallPopular: o.FloorRecallPopular}); len(fails) > 0 {
+		if fails := rep.BelowFloors(Floors{AUC: o.FloorAUC, PrecisionAtK: o.FloorPrecisionAtK, RecallPopular: o.FloorRecallPopular}); len(fails) > 0 {
 			for _, f := range fails {
 				fmt.Fprintln(out, "FAIL", f)
 			}
@@ -191,28 +142,6 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 		}
 		rep.Write(out)
 		fmt.Fprintf(out, "wrote %s\n", TruthPath(o.StateDir))
-		return 0
-	case "agree":
-		ao := AgreeOptions{Config: o.Config, Hub: hub, StateDir: o.StateDir, HTTP: o.HTTP, MinPoints: o.MinPoints,
-			MinAgeHours: o.MinAgeHours, MaxAgeHours: o.MaxAgeHours, Delay: 250 * time.Millisecond, Log: out}
-		var model *Model
-		if !o.NoDecide {
-			m, err := newModel()
-			if err != nil {
-				fmt.Fprintln(out, "ERROR", err)
-				return 2
-			}
-			model, ao.Model = m, m
-		}
-		rep, err := Agree(ctx, ao)
-		if err != nil {
-			fmt.Fprintln(out, "ERROR", err)
-			return 1
-		}
-		rep.Write(out)
-		if model != nil {
-			fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
-		}
 		return 0
 	}
 	return 2

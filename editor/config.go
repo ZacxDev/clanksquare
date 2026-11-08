@@ -22,9 +22,7 @@ type Config struct {
 	MaxAgeHours int `json:"max_age_hours"`
 
 	OpenRouterURL string `json:"openrouter_url"` // default https://openrouter.ai
-	EmbedModel    string `json:"embed_model"`
 	DecisionModel string `json:"decision_model"`
-	LabelModel    string `json:"label_model"`
 	// Prices are USD per million tokens [input, output] for each model the
 	// editor may call. A call to a model with no price is refused: without
 	// one the spend cap cannot be enforced.
@@ -61,19 +59,11 @@ type TruthConfig struct {
 	ReleaseLabel string `json:"release_label"`
 }
 
-// ClusterConfig tunes story clustering.
+// ClusterConfig tunes story clustering (by canonical URL, see cluster.go).
 type ClusterConfig struct {
-	// Threshold: an item joins the most similar open cluster whose centroid
-	// has cosine similarity >= Threshold.
-	Threshold float64 `json:"threshold"`
-	// Borderline: with AskBorderline, a best similarity in
-	// [Borderline, Threshold) is settled by a "same story?" decision.
-	Borderline    float64 `json:"borderline"`
-	AskBorderline bool    `json:"ask_borderline"`
-	// SameStoryMin is the noul probability at or above which a borderline
-	// pair is the same story.
-	SameStoryMin float64 `json:"same_story_min"`
-	WindowHours  int     `json:"window_hours"`
+	// WindowHours: an item joins a story with its canonical URL only within
+	// this many hours of the story's first item (default 72).
+	WindowHours int `json:"window_hours"`
 }
 
 // DecideConfig holds the decision settings.
@@ -84,15 +74,8 @@ type ClusterConfig struct {
 // MinPPost (0 = no floor). A story is eligible while its first item is less
 // than WindowHours old and it has not been posted; one not picked today is
 // ranked again tomorrow against that day's stories, until it leaves the window
-// (see pick.go).
-//
-// Post and Digest are the probability gate recorded as each decision's label
-// (post if P(post) >= Post, else digest if P(digest) >= Digest, else drop).
-// The label is what eval scores and what `digest` records; it no longer
-// decides what is posted.
+// (see pick.go). eval scores this pick (eval.go).
 type DecideConfig struct {
-	Post   float64 `json:"post"`
-	Digest float64 `json:"digest"`
 	// TopKPerDay is the per-channel daily post budget (default 4).
 	TopKPerDay int `json:"top_k_per_day,omitempty"`
 	// MinPPost is an optional absolute floor on P(post) for a pick (default
@@ -104,10 +87,6 @@ type DecideConfig struct {
 	// Question is the wording asked: "v1" (topicality and notability) or
 	// "v2" (the rubric, framed as notability for agent and LLM builders).
 	Question string `json:"question,omitempty"`
-	// API is how the decision model is called: "decisions" (OpenRouter's
-	// Decisions API) or "chat" (a chat model with structured output that
-	// answers the three probabilities).
-	API string `json:"api,omitempty"`
 }
 
 // Topic is one top-<topic> channel the editor owns.
@@ -120,8 +99,7 @@ type Topic struct {
 	Describe string `json:"describe"`
 	// From are the source slugs whose stories this topic considers: a story
 	// qualifies if any of its items came from one of them.
-	From      []string `json:"from"`
-	MaxPerRun int      `json:"max_per_run"`
+	From []string `json:"from"`
 }
 
 // slugRE is SPEC.md §7.1's slug rule.
@@ -140,14 +118,8 @@ func (c *Config) Defaults() {
 	if c.OpenRouterURL == "" {
 		c.OpenRouterURL = "https://openrouter.ai"
 	}
-	if c.EmbedModel == "" {
-		c.EmbedModel = "openai/text-embedding-3-small"
-	}
 	if c.DecisionModel == "" {
 		c.DecisionModel = DefaultDecisionModel
-	}
-	if c.LabelModel == "" {
-		c.LabelModel = "deepseek/deepseek-v4.1-flash"
 	}
 	if c.Prices == nil {
 		c.Prices = map[string][2]float64{}
@@ -160,23 +132,8 @@ func (c *Config) Defaults() {
 	if c.MaxSpendUSD == 0 {
 		c.MaxSpendUSD = 0.10
 	}
-	if c.Cluster.Threshold == 0 {
-		c.Cluster.Threshold = 0.82
-	}
-	if c.Cluster.Borderline == 0 {
-		c.Cluster.Borderline = 0.72
-	}
-	if c.Cluster.SameStoryMin == 0 {
-		c.Cluster.SameStoryMin = 0.7
-	}
 	if c.Cluster.WindowHours == 0 {
 		c.Cluster.WindowHours = 72
-	}
-	if c.Decide.Post == 0 {
-		c.Decide.Post = 0.6
-	}
-	if c.Decide.Digest == 0 {
-		c.Decide.Digest = 0.5
 	}
 	if c.Decide.Question == "" {
 		c.Decide.Question = "v2"
@@ -186,9 +143,6 @@ func (c *Config) Defaults() {
 	}
 	if c.Decide.WindowHours == 0 {
 		c.Decide.WindowHours = 72
-	}
-	if c.Decide.API == "" {
-		c.Decide.API = "decisions"
 	}
 	if c.Truth.MinAgeHours == 0 {
 		c.Truth.MinAgeHours = 48
@@ -210,11 +164,6 @@ func (c *Config) Defaults() {
 	}
 	if c.Truth.ReleaseLabel == "" {
 		c.Truth.ReleaseLabel = "digest"
-	}
-	for i := range c.Topics {
-		if c.Topics[i].MaxPerRun == 0 {
-			c.Topics[i].MaxPerRun = 5
-		}
 	}
 }
 
@@ -240,20 +189,12 @@ const (
 )
 
 // DefaultPrices are the OpenRouter list prices (USD per million tokens,
-// [input, output]) read from /api/v1/models on 2026-11-08.
+// [input, output]) read from /api/v1/models on 2026-11-08, for the Decisions
+// API models: the default decider and the bake-off's other candidate.
 var DefaultPrices = map[string][2]float64{
-	// DeepSeek V4.1 Flash: $0.051/M input, $0.567/M output (the undated
-	// alias; the 2026-10-17 snapshot "-1017" lists $0.006/$0.5).
-	"deepseek/deepseek-v4.1-flash":         {0.051, 0.567},
-	"deepseek/deepseek-v4.1-flash-1017":    {0.006, 0.5},
-	"perplexity/pplx-decider-v1.2":         {0.02, 0},
-	"openai/text-embedding-3-small":        {0.02, 0},
-	"scaledown/classify-1-20260928":        {0.04, 0},
-	"scaledown/classify-1":                 {0.04, 0},
-	"anthropic/claude-sonnet-5.5-20260928": {2, 10},
-	"anthropic/claude-sonnet-5.5":          {2, 10},
-	"anthropic/claude-haiku-5.5-20261007":  {0.1, 0.5},
-	"anthropic/claude-haiku-5.5":           {0.1, 0.5},
+	"perplexity/pplx-decider-v1.2":  {0.02, 0},
+	"scaledown/classify-1-20260928": {0.04, 0},
+	"scaledown/classify-1":          {0.04, 0},
 }
 
 // Validate checks a config after Defaults.
@@ -269,11 +210,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sources: bad slug %q", s)
 		}
 	}
-	if !(c.Cluster.Borderline <= c.Cluster.Threshold && c.Cluster.Threshold <= 1) {
-		return fmt.Errorf("cluster: want borderline <= threshold <= 1")
-	}
-	if c.Decide.Post <= 0 || c.Decide.Post > 1 || c.Decide.Digest <= 0 || c.Decide.Digest > 1 {
-		return fmt.Errorf("decide: thresholds must be in (0, 1]")
+	if c.Cluster.WindowHours < 1 || c.Cluster.WindowHours > 24*14 {
+		return fmt.Errorf("cluster: window_hours must be 1-336")
 	}
 	if c.Decide.TopKPerDay < 1 || c.Decide.TopKPerDay > 50 {
 		return fmt.Errorf("decide: top_k_per_day must be 1-50")
@@ -289,9 +227,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Decide.Question != "v1" && c.Decide.Question != "v2" {
 		return fmt.Errorf("decide: question must be v1 or v2")
-	}
-	if c.Decide.API != "decisions" && c.Decide.API != "chat" {
-		return fmt.Errorf("decide: api must be decisions or chat")
 	}
 	if t := c.Truth; t.HFDigest < 1 || t.HFPost <= t.HFDigest || t.HNDigest < 1 || t.HNPost <= t.HNDigest {
 		return fmt.Errorf("truth: want 1 <= *_digest < *_post")

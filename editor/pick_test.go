@@ -126,7 +126,6 @@ func TestRunBudgetSurvivesStateLoss(t *testing.T) {
 	// Two better stories arrive the same day, and the state file is lost.
 	rawPost(t, f.hub, f.curator, f.rawID, "Paper D", "https://arxiv.org/abs/2610.00004v1", "About agents D.", ms(-30*time.Minute))
 	rawPost(t, f.hub, f.curator, f.rawID, "Paper E", "https://arxiv.org/abs/2610.00005v1", "About agents E.", ms(-20*time.Minute))
-	f.or.vecs["Paper D"], f.or.vecs["Paper E"] = unitVec(0, 0, 0, 1), unitVec(0, 0, 0, 0, 1)
 	f.or.probs["Paper D"] = map[string]float64{"post": 0.97, "digest": 0.02, "drop": 0.01}
 	f.or.probs["Paper E"] = map[string]float64{"post": 0.95, "digest": 0.03, "drop": 0.02}
 	if err := os.Remove(StatePath(f.dir)); err != nil {
@@ -318,38 +317,5 @@ func TestTruthExcludesHFDailyOnlyItems(t *testing.T) {
 	saved, err := ReadTruth(TruthPath(f.dir))
 	if err != nil || saved[onlyHF].Excluded != ExcludedHFDailyOnly {
 		t.Fatalf("saved: %v %+v", err, saved[onlyHF])
-	}
-}
-
-// TestEvalAxis1SkipsExcludedRows: an excluded truth row is not scored on
-// axis 1, even when its label is post, and is counted as excluded.
-func TestEvalAxis1SkipsExcludedRows(t *testing.T) {
-	or := newFakeOR(t)
-	or.probs["Hot"] = map[string]float64{"post": 0.9, "digest": 0.05, "drop": 0.05}
-	or.probs["Cold"] = map[string]float64{"post": 0.1, "digest": 0.1, "drop": 0.8}
-	or.probs["Circular"] = map[string]float64{"post": 0.05, "digest": 0.1, "drop": 0.85}
-	cfg := &Config{HubURL: "https://hub.example", Sources: []string{"llm-papers"},
-		Topics: []Topic{{Slug: "top-llm-papers", Title: "T", Describe: "d", From: []string{"llm-papers"}, About: "model operator"}}}
-	cfg.Defaults()
-	labels := writeLabels(t,
-		LabelRow{ID: "m_1", Kind: "item", Channel: "llm-papers", Title: "Hot", ModelLabel: "post"},
-		LabelRow{ID: "m_2", Kind: "item", Channel: "llm-papers", Title: "Cold", ModelLabel: "drop"},
-		LabelRow{ID: "m_3", Kind: "item", Channel: "llm-papers", Title: "Circular", ModelLabel: "drop"},
-	)
-	v := 50
-	truth := map[string]TruthRow{
-		"m_1": {ID: "m_1", Signal: SignalHF, Value: &v, Label: "post"},
-		"m_2": {ID: "m_2", Signal: SignalHF, Value: &v, Label: "drop"},
-		"m_3": {ID: "m_3", Signal: SignalHF, Value: &v, Label: "post", Excluded: ExcludedHFDailyOnly},
-	}
-	rep, err := Eval(context.Background(), EvalOptions{Config: cfg, Model: or.model(1), Labels: labels, Truth: truth})
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := rep.Axis1
-	// Scored: m_1 (post, P 0.9) and m_2 (drop, P 0.1): AUC 1. With m_3 (post,
-	// P 0.05, below m_2) scored too, AUC would be 0.5 and popular 2.
-	if a.Rows != 2 || a.Excluded != 1 || a.Unknown != 0 || a.Positive != 1 || a.AUC != 1 {
-		t.Fatalf("axis1 rows %d excluded %d unknown %d popular %d auc %.3f", a.Rows, a.Excluded, a.Unknown, a.Positive, a.AUC)
 	}
 }

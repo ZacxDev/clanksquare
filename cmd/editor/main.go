@@ -1,15 +1,14 @@
-// Command editor groups the curator's raw channel items into stories, has a
-// decision model choose which to post, and posts them to top-<topic>
-// channels. It is one-shot: run it on a schedule. See editor/.
+// Command editor groups the curator's raw channel items into stories (by
+// canonical URL), has a decision model rank them, and posts each day's best
+// to top-<topic> channels. It is one-shot: run it on a schedule. See editor/.
 //
 //	editor measure     -config c.json                       # read-only, no model
 //	editor run         -config c.json -key k -state dir     # dry run (default)
 //	editor run         -config c.json -key k -state dir -preview  # dry run that keeps decisions + picks
 //	editor run         -config c.json -key k -state dir -post
-//	editor label-draft -config c.json -out labels.jsonl -items 200 -pairs 200
 //	editor truth       -config c.json -state dir              # read-only: HF/HN popularity labels
-//	editor eval        -config c.json -labels labels.jsonl -truth dir/truth.json [-floor-auc 0.6]
-//	editor agree       -config c.json [-state dir]          # read-only
+//	editor eval        -config c.json -truth dir/truth.json -preview-dir dir/preview   # no model calls
+//	editor eval        -config c.json -truth dir/truth.json [-since-hours 336]         # decides the hub window
 //	editor genkey      <path>
 //
 // The OpenRouter key comes from $OPENROUTER_API_KEY or -openrouter-key-file;
@@ -30,7 +29,7 @@ import (
 func main() { os.Exit(run(os.Args[1:])) }
 
 func usage() int {
-	fmt.Fprintln(os.Stderr, "usage: editor measure|run|label-draft|truth|eval|agree|genkey [flags] (editor <cmd> -h)")
+	fmt.Fprintln(os.Stderr, "usage: editor measure|run|truth|eval|genkey [flags] (editor <cmd> -h)")
 	return 2
 }
 
@@ -64,31 +63,17 @@ func run(args []string) int {
 		fs.StringVar(&o.StateDir, "state", "", "state directory (cluster state, pending posts, lock)")
 		fs.BoolVar(&o.Post, "post", false, "actually submit to the hub; without it the run is a dry run that submits nothing and writes no state")
 		fs.BoolVar(&o.Preview, "preview", false, "dry run that keeps its decisions and simulated picks in <state>/preview/ and appends them, with scores, to <state>/preview/preview-<UTC date>.jsonl; submits nothing")
-	case "label-draft":
-		fs.StringVar(&o.Out, "out", "", "JSONL file to write (required)")
-		fs.IntVar(&o.NItems, "items", 200, "item labels to draft")
-		fs.IntVar(&o.NPairs, "pairs", 200, "pair labels to draft")
-		fs.StringVar(&o.LabelSource, "source", "llm-papers", "raw channel to sample items from")
-		fs.StringVar(&o.Skip, "skip", "", "labels JSONL whose ids are not drafted again (resume a stopped draft into a new -out file)")
-		fs.StringVar(&o.OnlyIDs, "only", "", "labels JSONL: draft only its item ids (re-draft the same sample with another model)")
 	case "truth":
 		fs.StringVar(&o.StateDir, "state", "", "directory holding the truth cache, truth.json (required)")
 		fs.BoolVar(&o.Refresh, "refresh", false, "look up items the cache already labels, too")
 	case "eval":
-		fs.StringVar(&o.Labels, "labels", "", "labels JSONL (required)")
-		fs.StringVar(&o.Truth, "truth", "", "popularity truth file written by editor truth (axis 1; the floors apply to it only)")
-		fs.Float64Var(&o.FloorF1, "floor-f1", 0, "exit 1 if any label's F1 against the popularity truth (with support) is below this")
+		fs.StringVar(&o.Truth, "truth", "", "popularity truth file written by editor truth (required for any score)")
+		fs.StringVar(&o.PreviewDir, "preview-dir", "", "score the stories and P(post) in run -preview's preview-*.jsonl files here (no model calls); without it, decide the hub window")
+		fs.IntVar(&o.SinceHours, "since-hours", 336, "hub window: read source items at most this many hours old")
 		fs.Float64Var(&o.FloorAUC, "floor-auc", 0, "exit 1 if the AUC of P(post) against the popularity truth is below this")
-		fs.Float64Var(&o.FloorPrecisionPost, "floor-precision-post", 0, "exit 1 if precision of post against the popularity truth is below this")
-		fs.Float64Var(&o.FloorRecallPopular, "floor-recall-popular", 0, "exit 1 if the share of popular (truth post) items posted is below this")
-		fs.StringVar(&o.Predictions, "predictions", "", "write each item row's truth, prediction and probabilities to this JSONL file (never overwritten)")
-		fs.BoolVar(&o.HumanOnly, "human-only", false, "axis 2: score only rows with a human_label (else human_label, falling back to model_label)")
-	case "agree":
-		fs.StringVar(&o.StateDir, "state", "", "state directory written by run -post: its decisions are used where it has them")
-		fs.IntVar(&o.MinPoints, "min-points", 100, "HN points that make an item 'popular'")
-		fs.IntVar(&o.MinAgeHours, "min-age-hours", 48, "only items at least this old")
-		fs.IntVar(&o.MaxAgeHours, "max-age-hours", 168, "only items at most this old")
-		fs.BoolVar(&o.NoDecide, "no-decide", false, "do not ask the decision model about popular items the state has no decision for")
+		fs.Float64Var(&o.FloorPrecisionAtK, "floor-precision-at-k", 0, "exit 1 if the share of picked stories (top_k_per_day per UTC day) whose truth is post is below this")
+		fs.Float64Var(&o.FloorRecallPopular, "floor-recall-popular", 0, "exit 1 if the share of popular (truth post) stories picked is below this")
+		fs.StringVar(&o.Predictions, "predictions", "", "write each story's day, P(post), pick and truth to this JSONL file (never overwritten)")
 	default:
 		return usage()
 	}

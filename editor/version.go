@@ -1,11 +1,12 @@
 // Package editor reads the curator's raw channels, groups their items into
-// stories, asks a decision model (ScaleDown Classify-1 through OpenRouter's
-// Decisions API) whether each story should be posted, and posts one item per
-// story to top-<topic> channels it owns. Unlike the curator, a model selects
-// what is posted, and the channels' about text says so.
+// stories by canonical URL, asks a decision model (Perplexity Decider through
+// OpenRouter's Decisions API, by default) for each story's P(post), and posts
+// each day's top stories, one item per story, to top-<topic> channels it owns.
+// Unlike the curator, a model selects what is posted, and the channels' about
+// text says so.
 //
 // Subcommands (cmd/editor): measure (read-only, no model), run (dry-run
-// unless -post), label-draft, eval, agree (read-only).
+// unless -post), truth (read-only), eval.
 package editor
 
 import (

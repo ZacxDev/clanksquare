@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ZacxDev/clanksquare/internal/canon"
@@ -227,6 +229,62 @@ func (o *TruthOptions) hfLookup(ctx context.Context, arxivID string) (*hfPaper, 
 	return &p, nil
 }
 
+func canonOf(link string) string { return canon.Key(link) }
+
+func (o *TruthOptions) getJSON(ctx context.Context, u string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	resp, err := o.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: HTTP %d", u, resp.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
+}
+
+// hnQuery is the Algolia query for a canonical URL: the arXiv id for a paper
+// (so abs, pdf and html submissions all match), else the URL without scheme.
+func hnQuery(key string) string {
+	if id := canon.ArxivID(key); id != "" {
+		return id
+	}
+	return strings.TrimPrefix(key, "https://")
+}
+
+// hnLookup is the highest HN score of a submission whose URL has the same
+// canonical key, and whether any submission matched: an item that was never
+// submitted has no signal, which is not the same as 0 points.
+func (o *TruthOptions) hnLookup(ctx context.Context, key string) (int, bool, error) {
+	q := url.Values{"restrictSearchableAttributes": {"url"}, "query": {hnQuery(key)}, "hitsPerPage": {"50"}}
+	var out struct {
+		Hits []struct {
+			URL    string `json:"url"`
+			Points int    `json:"points"`
+		} `json:"hits"`
+	}
+	if err := o.getJSON(ctx, o.HNBase+"/api/v1/search?"+q.Encode(), &out); err != nil {
+		return 0, false, err
+	}
+	best, found := 0, false
+	for _, h := range out.Hits {
+		if canon.Key(h.URL) == key {
+			found = true
+			if h.Points > best {
+				best = h.Points
+			}
+		}
+	}
+	return best, found, nil
+}
+
 // releaseRE matches a GitHub release page.
 var releaseRE = regexp.MustCompile(`^https://github\.com/[^/]+/[^/]+/releases(/|$)`)
 
@@ -275,8 +333,7 @@ func (o *TruthOptions) truthFor(ctx context.Context, it Item, now int64) TruthRo
 		row.Signal, row.Label = SignalRelease, tc.ReleaseLabel
 		return row
 	}
-	ao := AgreeOptions{HTTP: o.HTTP, HNBase: o.HNBase}
-	n, found, err := ao.hnLookup(ctx, it.Canon)
+	n, found, err := o.hnLookup(ctx, it.Canon)
 	switch {
 	case err != nil:
 		row.Why = "lookup_failed"

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -247,31 +246,21 @@ func rawPost(t *testing.T, h *fakeHub, key ed25519.PrivateKey, channelID, title,
 
 // ---- fake OpenRouter ----
 
-// fakeOR serves /api/v1/embeddings, /api/alpha/decisions and
-// /api/v1/chat/completions. Embeddings come from vecs (by the text's first
-// line, the title) or are a unit vector on a dimension hashed from the text;
-// decisions return probs[title] (default drop-heavy).
+// fakeOR serves /api/alpha/decisions: probs[title] (default drop-heavy).
 type fakeOR struct {
 	srv *httptest.Server
 
 	mu       sync.Mutex
-	vecs     map[string][]float64
 	probs    map[string]map[string]float64
-	same     float64
-	chat     func(system, user string) string
 	requests map[string]int
 	bodies   []map[string]any
 	cost     float64 // usage.cost on every answer
 }
 
-const fakeDims = 64
-
 func newFakeOR(t *testing.T) *fakeOR {
-	f := &fakeOR{vecs: map[string][]float64{}, probs: map[string]map[string]float64{}, requests: map[string]int{}, cost: 0.0001}
+	f := &fakeOR{probs: map[string]map[string]float64{}, requests: map[string]int{}, cost: 0.0001}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/embeddings", f.embeddings)
 	mux.HandleFunc("POST /api/alpha/decisions", f.decisions)
-	mux.HandleFunc("POST /api/v1/chat/completions", f.chatHandler)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -285,28 +274,6 @@ func (f *fakeOR) read(r *http.Request, path string) map[string]any {
 	f.requests[path]++
 	f.bodies = append(f.bodies, body)
 	return body
-}
-
-func (f *fakeOR) vecFor(text string) []float64 {
-	title, _, _ := strings.Cut(text, "\n")
-	if v, ok := f.vecs[title]; ok {
-		return v
-	}
-	h := sha256.Sum256([]byte(text))
-	v := make([]float64, fakeDims)
-	v[int(h[0])%fakeDims] = 1
-	return v
-}
-
-func (f *fakeOR) embeddings(w http.ResponseWriter, r *http.Request) {
-	body := f.read(r, "embeddings")
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var data []map[string]any
-	for i, in := range body["input"].([]any) {
-		data = append(data, map[string]any{"index": i, "embedding": f.vecFor(in.(string))})
-	}
-	okJSON(w, map[string]any{"data": data, "usage": map[string]any{"prompt_tokens": 1, "cost": f.cost}})
 }
 
 func (f *fakeOR) decisions(w http.ResponseWriter, r *http.Request) {
@@ -340,24 +307,9 @@ func (f *fakeOR) decisions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			answers[k] = map[string]any{"type": "choice", "choice": best, "probabilities": p, "confidence": bp}
-		case "noul":
-			answers[k] = map[string]any{"type": "noul", "noul": f.same}
 		}
 	}
 	okJSON(w, map[string]any{"model": "scaledown/classify-1-20260928", "answers": answers, "usage": map[string]any{"input_tokens": 500, "cost": f.cost}})
-}
-
-func (f *fakeOR) chatHandler(w http.ResponseWriter, r *http.Request) {
-	body := f.read(r, "chat")
-	msgs := body["messages"].([]any)
-	sys := msgs[0].(map[string]any)["content"].(string)
-	user := msgs[1].(map[string]any)["content"].(string)
-	text := ""
-	if f.chat != nil {
-		text = f.chat(sys, user)
-	}
-	okJSON(w, map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": text}}},
-		"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 10, "cost": f.cost}})
 }
 
 func (f *fakeOR) count(path string) int {
@@ -369,16 +321,4 @@ func (f *fakeOR) count(path string) int {
 func (f *fakeOR) model(capUSD float64) *Model {
 	m, _ := NewMeter(capUSD, "")
 	return &Model{Base: f.srv.URL, Key: "test-key", HTTP: f.srv.Client(), Meter: m, Prices: DefaultPrices}
-}
-
-func unitVec(xs ...float64) []float64 {
-	v := make([]float64, fakeDims)
-	var n float64
-	for _, x := range xs {
-		n += x * x
-	}
-	for i, x := range xs {
-		v[i] = x / math.Sqrt(n)
-	}
-	return v
 }

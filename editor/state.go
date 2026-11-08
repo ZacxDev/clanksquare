@@ -16,11 +16,11 @@ import (
 //	 "stories": {"s_…": Story},
 //	 "channels":{"c_…": {"slug":"top-…","seen":{"s_…":<ms>},"pending":{"s_…":"<token>"}}}}
 //
-// Cluster state is the editor's own: unlike the curator's seen set it cannot
-// be rebuilt from a log, because the stories' membership and centroids are
-// not in any post. A lost state file means items are re-clustered (and
-// re-embedded); the top channels' seen sets are rebuilt from their logs, so a
-// story is still never posted twice.
+// Story state is the editor's own: unlike the curator's seen set it cannot
+// be rebuilt from a log, because the stories' membership and decisions are
+// not in any post. A lost state file means items are regrouped (and stories
+// decided again); the top channels' seen sets are rebuilt from their logs, so
+// a story is still never posted twice.
 //
 // Pending is the curator's write-ahead pattern: a token is saved before it
 // is submitted and replaced by a seen entry once the hub confirms it, so a
@@ -46,10 +46,6 @@ type Story struct {
 	Last    int64       `json:"last"`
 	Canon   []string    `json:"canon"`
 	Items   []StoryItem `json:"items"`
-	// Centroid is the sum of its embedded items' unit vectors (N of them).
-	// It is dropped once the story closes (older than the window).
-	Centroid []float64 `json:"centroid,omitempty"`
-	N        int       `json:"n,omitempty"`
 	// Decisions are keyed by topic slug.
 	Decisions map[string]*StoryDecision `json:"decisions,omitempty"`
 }
@@ -68,8 +64,7 @@ type StoryItem struct {
 
 // StoryDecision is a decision model's verdict on a story for one topic.
 type StoryDecision struct {
-	Label string             `json:"label"` // post | digest | drop, after the gate
-	Raw   string             `json:"raw"`   // the model's own winner
+	Raw   string             `json:"raw"` // the model's own winner
 	Probs map[string]float64 `json:"probs"`
 	Model string             `json:"model"`
 	At    int64              `json:"at"`

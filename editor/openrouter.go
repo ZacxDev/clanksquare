@@ -209,34 +209,6 @@ func (u usage) cost() float64 {
 	return *u.Cost
 }
 
-// Embed returns one embedding per input, in input order.
-func (m *Model) Embed(ctx context.Context, model string, inputs []string) ([][]float64, error) {
-	var out struct {
-		Data []struct {
-			Index     int       `json:"index"`
-			Embedding []float64 `json:"embedding"`
-		} `json:"data"`
-		Usage usage `json:"usage"`
-	}
-	req := map[string]any{"model": model, "input": inputs}
-	if err := m.post(ctx, "/api/v1/embeddings", model, req, 0, &out, func() float64 { return out.Usage.cost() }); err != nil {
-		return nil, err
-	}
-	res := make([][]float64, len(inputs))
-	for _, d := range out.Data {
-		if d.Index < 0 || d.Index >= len(inputs) || len(d.Embedding) == 0 {
-			return nil, fmt.Errorf("embeddings: bad item index %d", d.Index)
-		}
-		res[d.Index] = d.Embedding
-	}
-	for i, e := range res {
-		if e == nil {
-			return nil, fmt.Errorf("embeddings: no vector for input %d", i)
-		}
-	}
-	return res, nil
-}
-
 // Question is one Decisions API question.
 type Question struct {
 	Type         string `json:"type"` // choice | noul
@@ -289,56 +261,6 @@ func (m *Model) Decide(ctx context.Context, model string, state any, questions m
 		}
 	}
 	return &Decision{Model: out.Model, Answers: out.Answers}, nil
-}
-
-// Chat calls /api/v1/chat/completions and returns the assistant's text and
-// whether it was cut off at maxTokens (finish_reason "length").
-func (m *Model) Chat(ctx context.Context, model, system, user string, maxTokens int) (string, bool, error) {
-	return m.chat(ctx, model, system, user, maxTokens, nil)
-}
-
-// ChatJSON is Chat with a strict JSON-schema structured output.
-func (m *Model) ChatJSON(ctx context.Context, model, system, user string, maxTokens int, schema map[string]any) (string, bool, error) {
-	return m.chat(ctx, model, system, user, maxTokens, map[string]any{
-		"response_format": map[string]any{"type": "json_schema",
-			"json_schema": map[string]any{"name": "answer", "strict": true, "schema": schema}},
-	})
-}
-
-func (m *Model) chat(ctx context.Context, model, system, user string, maxTokens int, extra map[string]any) (string, bool, error) {
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-		Usage usage `json:"usage"`
-	}
-	req := map[string]any{
-		"model":       model,
-		"max_tokens":  maxTokens,
-		"temperature": 0,
-		"messages": []map[string]string{
-			{"role": "system", "content": system},
-			{"role": "user", "content": user},
-		},
-		"usage": map[string]bool{"include": true},
-		// Reasoning off: DeepSeek V4.1 Flash reasons by default, and its
-		// reasoning tokens are billed as output and count against
-		// max_tokens (on 2026-11-08 they truncated 154 of 200 label rows).
-		"reasoning": map[string]any{"enabled": false},
-	}
-	for k, v := range extra {
-		req[k] = v
-	}
-	if err := m.post(ctx, "/api/v1/chat/completions", model, req, maxTokens, &out, func() float64 { return out.Usage.cost() }); err != nil {
-		return "", false, err
-	}
-	if len(out.Choices) == 0 {
-		return "", false, fmt.Errorf("chat: no choices")
-	}
-	return out.Choices[0].Message.Content, out.Choices[0].FinishReason == "length", nil
 }
 
 // LoadAPIKey reads the OpenRouter key from $OPENROUTER_API_KEY or, failing

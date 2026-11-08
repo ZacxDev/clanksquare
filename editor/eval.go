@@ -1,103 +1,101 @@
 package editor
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/ZacxDev/clanksquare/internal/hubkit"
 )
 
-// PRF is precision, recall and F1 for one label.
-type PRF struct {
-	Label      string
-	TP, FP, FN int
-	Support    int // rows whose truth is this label
-}
-
-func (p PRF) Precision() float64 { return ratio(p.TP, p.TP+p.FP) }
-func (p PRF) Recall() float64    { return ratio(p.TP, p.TP+p.FN) }
-func (p PRF) F1() float64 {
-	pr, rc := p.Precision(), p.Recall()
-	if pr+rc == 0 {
-		return 0
-	}
-	return 2 * pr * rc / (pr + rc)
-}
-
-func ratio(a, b int) float64 {
-	if b == 0 {
-		return 0
-	}
-	return float64(a) / float64(b)
-}
-
-// Score computes per-label precision, recall and F1 of pred against truth.
-// Rows with an empty truth are skipped. It is pure.
-func Score(truth, pred []string, labels []string) []PRF {
-	out := make([]PRF, len(labels))
-	idx := map[string]int{}
-	for i, l := range labels {
-		out[i].Label = l
-		idx[l] = i
-	}
-	for k := range truth {
-		t, p := truth[k], pred[k]
-		if t == "" {
-			continue
-		}
-		if i, ok := idx[t]; ok {
-			out[i].Support++
-		}
-		if t == p {
-			if i, ok := idx[t]; ok {
-				out[i].TP++
-			}
-			continue
-		}
-		if i, ok := idx[t]; ok {
-			out[i].FN++
-		}
-		if i, ok := idx[p]; ok {
-			out[i].FP++
-		}
-	}
-	return out
-}
+// eval scores what run would POST, the top_k_per_day rank pick, against the
+// popularity truth (truth.json, written by `editor truth`). It reads its
+// stories from one of two places:
+//
+//   - the preview files (-preview-dir): every decided story run -preview
+//     logged, with the P(post) it got then. No model is called, so this scores
+//     the decider that wrote the files.
+//   - the hub window (the default): every source item of the last
+//     SinceHours, grouped into stories the way run groups them and decided by
+//     the configured decider. This is how another decider is scored on the
+//     same stories.
+//
+// Each topic's stories are split by the UTC day of their first item, and each
+// day's are picked as run picks them (RankPick: the top_k_per_day highest
+// P(post), ties by story id, at or above min_p_post). That approximates run,
+// which also carries an unpicked story into the next days while it is inside
+// decide.window_hours; eval gives each story one day only.
 
 // EvalOptions configure eval.
 type EvalOptions struct {
-	Config    *Config
-	Model     *Model
-	Labels    string
-	HumanOnly bool
-	// Truth is the popularity truth by item id (axis 1). Without it only
-	// axis 2 (agreement with the labels file) is reported.
+	Config *Config
+	// Truth is the popularity truth by item id. Stories join it by
+	// canonical URL. Without it nothing can be scored.
 	Truth map[string]TruthRow
-	// Predictions, if set, receives one JSON line per scored item row:
-	// {"id","truth","pred","probs"}, for sweeping thresholds offline.
+	// PreviewDir, when set, is the directory of run -preview's
+	// preview-YYYY-MM-DD.jsonl files (<state>/preview).
+	PreviewDir string
+	// Hub and Model are used when PreviewDir is empty.
+	Hub   *hubkit.Client
+	Model *Model
+	// SinceHours: the hub window reads items at most this old (default 336).
+	SinceHours int
+	Now        func() time.Time
+	Log        io.Writer
+	// Predictions, if set, receives one JSON line per story (EvalRow).
 	Predictions io.Writer
 }
 
-// Axis1 scores the decisions against the popularity truth: the only axis
-// eval gates on.
-type Axis1 struct {
-	Rows    int // item rows with a truth label
-	Unknown int // item rows whose truth is unknown (not scored)
-	// Excluded: item rows whose truth row is excluded from axis 1
-	// (TruthRow.Excluded, e.g. hf_daily_only), not scored.
-	Excluded int
-	Items    []PRF // per label, against the truth
-	Positive int   // rows whose truth is post (the popular items)
-	// PrecisionPost: of the rows decided post, the share whose truth is post.
-	// RecallPopular: of the rows whose truth is post, the share decided post.
-	PrecisionPost, RecallPopular float64
-	PredictedPost                int
-	// AUC of P(post) separating truth post from truth digest/drop (ties
-	// count half); NaN-free: 0 when either class is empty.
-	AUC       float64
-	Confusion map[string]map[string]int
+// EvalRow is one decided story of one topic, as eval scored it.
+type EvalRow struct {
+	Topic    string  `json:"topic"`
+	Story    string  `json:"story"`
+	Day      string  `json:"day"` // UTC date of the story's first item
+	URL      string  `json:"url"`
+	PPost    float64 `json:"p_post"`
+	Model    string  `json:"model"`
+	Picked   bool    `json:"picked"`
+	Truth    string  `json:"truth"` // post | digest | drop, "" unknown
+	Excluded string  `json:"excluded,omitempty"`
+	Signal   string  `json:"signal,omitempty"`
+	Value    *int    `json:"value,omitempty"`
+	created  int64
+}
+
+// EvalReport is the result of eval.
+type EvalReport struct {
+	Source   string
+	Models   []string // the decision models whose P(post) was scored
+	K        int
+	MinPPost float64
+	Rows     []EvalRow
+
+	Stories  int // decided stories, all topics
+	Days     int // distinct (topic, UTC day) groups
+	Picked   int
+	Scored   int // stories with a truth label (not excluded)
+	Unknown  int // stories whose truth is unknown
+	Excluded int // stories whose truth is excluded (hf_daily_only)
+	Positive int // scored stories whose truth is post (the popular ones)
+	// PickedScored: picked stories with a truth label; PickedPositive: picked
+	// stories whose truth is post.
+	PickedScored, PickedPositive int
+	// PrecisionAtK = PickedPositive / PickedScored; RecallPopular =
+	// PickedPositive / Positive; AUC of P(post) over the scored stories,
+	// truth post against truth digest/drop.
+	PrecisionAtK, RecallPopular, AUC float64
+
+	// Decision cost and latency (hub window only).
+	Decisions   int
+	DecideSpend float64
+	Latencies   []time.Duration
 }
 
 // AUC is the probability that a random positive scores above a random
@@ -129,88 +127,51 @@ func AUC(scores []float64, positive []bool) float64 {
 	return u / float64(len(pos)*len(neg))
 }
 
-// EvalReport is the result of eval.
-type EvalReport struct {
-	// Axis1 is nil without a truth file.
-	Axis1 *Axis1
-	// Axis 2: agreement with the labels file's model (or human) labels.
-	// This is agreement with a model, not truth.
-	Items      []PRF
-	Pairs      PRF // the "same" label over pairs: pairwise cluster F1
-	ItemRows   int
-	PairRows   int
-	LabelModel string
-	Thresholds string
-	Confusion  map[string]map[string]int // label -> pred -> n
-	// Decision cost and latency, over the item decisions.
-	Decisions   int
-	DecideSpend float64
-	Latencies   []time.Duration
+func ratio(a, b int) float64 {
+	if b == 0 {
+		return 0
+	}
+	return float64(a) / float64(b)
 }
 
-// Floors are eval's exit floors. They apply to axis 1 (the popularity
-// truth) only: agreement with a model's labels never fails eval.
+// Floors are eval's exit floors.
 type Floors struct {
-	F1            float64 // every truth label with support
 	AUC           float64
-	PrecisionPost float64
+	PrecisionAtK  float64
 	RecallPopular float64
 }
 
-func (f Floors) any() bool {
-	return f.F1 > 0 || f.AUC > 0 || f.PrecisionPost > 0 || f.RecallPopular > 0
-}
+func (f Floors) any() bool { return f.AUC > 0 || f.PrecisionAtK > 0 || f.RecallPopular > 0 }
 
-// BelowFloors lists every floor the report misses on axis 1. With any floor
-// set, an axis 1 that cannot be scored (no truth, or no popular item) is a
-// failure, not a pass. A label with no support has no F1 and is not checked.
+// BelowFloors lists every floor the report misses. With any floor set, a
+// report that cannot be scored (no truth, or no popular story, or nothing
+// else) is a failure, not a pass.
 func (r *EvalReport) BelowFloors(f Floors) []string {
 	if !f.any() {
 		return nil
 	}
-	a := r.Axis1
-	if a == nil || a.Rows == 0 {
-		return []string{"axis 1: no item has a popularity truth label (pass -truth)"}
+	if r == nil || r.Scored == 0 {
+		return []string{"eval: no story has a popularity truth label (pass -truth)"}
 	}
-	if a.Positive == 0 || a.Positive == a.Rows {
-		return []string{fmt.Sprintf("axis 1: %d of %d truth rows are post: AUC, precision and recall are undefined", a.Positive, a.Rows)}
+	if r.Positive == 0 || r.Positive == r.Scored {
+		return []string{fmt.Sprintf("eval: %d of %d scored stories are post: AUC, precision and recall are undefined", r.Positive, r.Scored)}
 	}
 	var out []string
-	for _, p := range a.Items {
-		if p.Support > 0 && p.F1() < f.F1 {
-			out = append(out, fmt.Sprintf("axis 1: label %s F1 %.3f < floor %.3f", p.Label, p.F1(), f.F1))
-		}
+	if r.AUC < f.AUC {
+		out = append(out, fmt.Sprintf("eval: AUC %.3f < floor %.3f", r.AUC, f.AUC))
 	}
-	if a.AUC < f.AUC {
-		out = append(out, fmt.Sprintf("axis 1: AUC %.3f < floor %.3f", a.AUC, f.AUC))
+	if r.PrecisionAtK < f.PrecisionAtK {
+		out = append(out, fmt.Sprintf("eval: precision@k %.3f < floor %.3f", r.PrecisionAtK, f.PrecisionAtK))
 	}
-	if a.PrecisionPost < f.PrecisionPost {
-		out = append(out, fmt.Sprintf("axis 1: precision@post %.3f < floor %.3f", a.PrecisionPost, f.PrecisionPost))
-	}
-	if a.RecallPopular < f.RecallPopular {
-		out = append(out, fmt.Sprintf("axis 1: recall of popular items %.3f < floor %.3f", a.RecallPopular, f.RecallPopular))
+	if r.RecallPopular < f.RecallPopular {
+		out = append(out, fmt.Sprintf("eval: recall of popular stories %.3f < floor %.3f", r.RecallPopular, f.RecallPopular))
 	}
 	return out
 }
 
-func writeConfusion(w io.Writer, prefix string, c map[string]map[string]int) {
-	truths := make([]string, 0, len(c))
-	for t := range c {
-		truths = append(truths, t)
-	}
-	sort.Strings(truths)
-	for _, t := range truths {
-		fmt.Fprintf(w, "%s truth=%s", prefix, t)
-		for _, l := range Labels {
-			fmt.Fprintf(w, " %s=%d", l, c[t][l])
-		}
-		fmt.Fprintln(w)
-	}
-}
-
 // Write prints the report.
 func (r *EvalReport) Write(w io.Writer) {
-	fmt.Fprintf(w, "eval %s item_rows=%d pair_rows=%d\n", r.Thresholds, r.ItemRows, r.PairRows)
+	fmt.Fprintf(w, "eval source=%s models=%v top_k_per_day=%d min_p_post=%.3f\n", r.Source, r.Models, r.K, r.MinPPost)
 	if r.Decisions > 0 {
 		lat := append([]time.Duration(nil), r.Latencies...)
 		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
@@ -221,198 +182,252 @@ func (r *EvalReport) Write(w io.Writer) {
 		fmt.Fprintf(w, "decisions=%d spend=$%.6f cost_per_100=$%.6f latency_mean=%dms p50=%dms p95=%dms\n", r.Decisions, r.DecideSpend,
 			r.DecideSpend*100/float64(r.Decisions), (sum / time.Duration(len(lat))).Milliseconds(), lat[len(lat)/2].Milliseconds(), lat[min(len(lat)-1, len(lat)*95/100)].Milliseconds())
 	}
-	if a := r.Axis1; a != nil {
-		fmt.Fprintf(w, "axis1 (popularity truth) rows=%d unknown=%d excluded=%d popular=%d predicted_post=%d auc=%.3f precision_at_post=%.3f recall_popular=%.3f\n",
-			a.Rows, a.Unknown, a.Excluded, a.Positive, a.PredictedPost, a.AUC, a.PrecisionPost, a.RecallPopular)
-		for _, p := range a.Items {
-			fmt.Fprintf(w, "axis1 label=%s support=%d precision=%.3f recall=%.3f f1=%.3f\n", p.Label, p.Support, p.Precision(), p.Recall(), p.F1())
-		}
-		writeConfusion(w, "axis1 confusion", a.Confusion)
-	} else {
-		fmt.Fprintln(w, "axis1 (popularity truth): not scored, no -truth")
-	}
-	fmt.Fprintf(w, "axis2 (agreement with a model, not truth: labels by %s)\n", r.LabelModel)
-	for _, p := range r.Items {
-		fmt.Fprintf(w, "axis2 label=%s support=%d precision=%.3f recall=%.3f f1=%.3f\n", p.Label, p.Support, p.Precision(), p.Recall(), p.F1())
-	}
-	writeConfusion(w, "axis2 confusion", r.Confusion)
-	fmt.Fprintf(w, "axis2 pairs support=%d precision=%.3f recall=%.3f pairwise_cluster_f1=%.3f\n", r.Pairs.Support, r.Pairs.Precision(), r.Pairs.Recall(), r.Pairs.F1())
+	fmt.Fprintf(w, "eval stories=%d days=%d picked=%d scored=%d unknown=%d excluded=%d popular=%d picked_scored=%d picked_popular=%d precision_at_k=%.3f recall_popular=%.3f auc=%.3f\n",
+		r.Stories, r.Days, r.Picked, r.Scored, r.Unknown, r.Excluded, r.Positive, r.PickedScored, r.PickedPositive, r.PrecisionAtK, r.RecallPopular, r.AUC)
 }
 
-// Eval scores the configured decision model, decision thresholds and
-// clustering rule against a labels file.
+// storyTruth is a story's truth, joined by canonical URL: excluded if any row
+// for the URL is, else the label of the first labelled row (by item id).
+type storyTruth struct {
+	label, excluded, signal string
+	value                   *int
+}
+
+func truthByURL(rows map[string]TruthRow) map[string]storyTruth {
+	ids := make([]string, 0, len(rows))
+	for id := range rows {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := map[string]storyTruth{}
+	for _, id := range ids {
+		r := rows[id]
+		if r.URL == "" {
+			continue
+		}
+		st := out[r.URL]
+		if r.Excluded != "" {
+			st.excluded = r.Excluded
+		}
+		if st.label == "" && r.Label != "" {
+			st.label, st.signal, st.value = r.Label, r.Signal, r.Value
+		}
+		out[r.URL] = st
+	}
+	return out
+}
+
+// Eval scores the rank pick against the truth.
 func Eval(ctx context.Context, o EvalOptions) (*EvalReport, error) {
-	rows, err := ReadLabels(o.Labels)
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if o.Log == nil {
+		o.Log = io.Discard
+	}
+	if o.SinceHours == 0 {
+		o.SinceHours = 336
+	}
+	cfg := o.Config
+	rep := &EvalReport{K: cfg.Decide.TopKPerDay, MinPPost: cfg.Decide.MinPPost}
+	var err error
+	if o.PreviewDir != "" {
+		rep.Source = "preview:" + o.PreviewDir
+		rep.Rows, err = previewRows(o.PreviewDir)
+	} else {
+		rep.Source = fmt.Sprintf("hub:%dh", o.SinceHours)
+		rep.Rows, err = hubRows(ctx, o, rep)
+	}
 	if err != nil {
 		return nil, err
 	}
-	cfg := o.Config
-	rep := &EvalReport{Confusion: map[string]map[string]int{},
-		Thresholds: fmt.Sprintf("decision_model=%s api=%s question=%s post>=%.2f digest>=%.2f embed_model=%s cluster>=%.2f", cfg.DecisionModel, cfg.Decide.API, cfg.Decide.Question, cfg.Decide.Post, cfg.Decide.Digest, cfg.EmbedModel, cfg.Cluster.Threshold)}
-	var a1 *Axis1
-	var a1Truth, a1Pred []string
-	var a1Score []float64
-	var a1Pos []bool
-	if o.Truth != nil {
-		a1 = &Axis1{Confusion: map[string]map[string]int{}}
-	}
-	var itemTruth, itemPred, pairTruth, pairPred []string
-	var pairRows []LabelRow
-	models := map[string]bool{}
-	for _, r := range rows {
-		t := r.Truth(o.HumanOnly)
-		pop := ""
-		if r.Kind == "item" && o.Truth != nil {
-			tr := o.Truth[r.ID]
-			pop = tr.Label
-			switch {
-			case tr.Excluded != "":
-				// Graded by its own source's votes (circular): not axis 1.
-				pop = ""
-				a1.Excluded++
-			case pop == "":
-				a1.Unknown++
-			}
+	scoreRows(rep, truthByURL(o.Truth), cfg.Decide)
+	if o.Predictions != nil {
+		for _, row := range rep.Rows {
+			raw, _ := json.Marshal(row)
+			o.Predictions.Write(append(raw, '\n'))
 		}
-		if t == "" && pop == "" {
-			continue
-		}
-		switch r.Kind {
-		case "item":
-			topic := topicFor(cfg, r.Channel)
-			if topic == nil {
-				return nil, fmt.Errorf("label %s: no topic reads channel %q", r.ID, r.Channel)
-			}
-			link := ""
-			if len(r.Links) > 0 {
-				link = r.Links[0]
-			}
-			st := &Story{ID: storyID(r.ID), Items: []StoryItem{{ID: r.ID, Channel: r.Channel, Title: r.Title, Excerpt: r.Excerpt, Link: link}}}
-			before, start := o.Model.Meter.Spent(), time.Now()
-			d, err := DecideStory(ctx, o.Model, cfg.DecisionModel, cfg.Decide, topic, st, 0)
-			if err != nil {
-				return nil, fmt.Errorf("label %s: %w", r.ID, err)
-			}
-			rep.Latencies = append(rep.Latencies, time.Since(start))
-			rep.DecideSpend += o.Model.Meter.Spent() - before
-			rep.Decisions++
-			if pop != "" {
-				a1Truth = append(a1Truth, pop)
-				a1Pred = append(a1Pred, d.Label)
-				a1Score = append(a1Score, d.Probs["post"])
-				a1Pos = append(a1Pos, pop == "post")
-				if a1.Confusion[pop] == nil {
-					a1.Confusion[pop] = map[string]int{}
-				}
-				a1.Confusion[pop][d.Label]++
-			}
-			if o.Predictions != nil {
-				row := map[string]any{"id": r.ID, "truth": t, "popularity": pop, "pred": d.Label, "probs": d.Probs}
-				if tr, ok := o.Truth[r.ID]; ok && tr.Value != nil {
-					row["signal"], row["value"] = tr.Signal, *tr.Value
-				}
-				raw, _ := json.Marshal(row)
-				o.Predictions.Write(append(raw, '\n'))
-			}
-			if t == "" {
-				continue
-			}
-			if r.Model != "" {
-				models[r.Model] = true
-			}
-			itemTruth = append(itemTruth, t)
-			itemPred = append(itemPred, d.Label)
-			if rep.Confusion[t] == nil {
-				rep.Confusion[t] = map[string]int{}
-			}
-			rep.Confusion[t][d.Label]++
-		case "pair":
-			if r.Model != "" {
-				models[r.Model] = true
-			}
-			pairRows = append(pairRows, r)
-			pairTruth = append(pairTruth, t)
-		}
-	}
-	if len(pairRows) > 0 {
-		preds, err := predictPairs(ctx, o.Model, cfg, pairRows)
-		if err != nil {
-			return nil, err
-		}
-		pairPred = preds
-	}
-	rep.ItemRows, rep.PairRows = len(itemTruth), len(pairTruth)
-	rep.Items = Score(itemTruth, itemPred, Labels)
-	rep.Pairs = Score(pairTruth, pairPred, []string{"same", "different"})[0]
-	var ms []string
-	for m := range models {
-		ms = append(ms, m)
-	}
-	sort.Strings(ms)
-	rep.LabelModel = fmt.Sprint(ms)
-	if a1 != nil {
-		a1.Rows = len(a1Truth)
-		a1.Items = Score(a1Truth, a1Pred, Labels)
-		post := a1.Items[0] // Labels[0] is post
-		a1.Positive = post.Support
-		a1.PredictedPost = post.TP + post.FP
-		a1.PrecisionPost, a1.RecallPopular = post.Precision(), post.Recall()
-		a1.AUC = AUC(a1Score, a1Pos)
-		rep.Axis1 = a1
 	}
 	return rep, nil
 }
 
-func topicFor(cfg *Config, channel string) *Topic {
-	for i := range cfg.Topics {
-		if contains(cfg.Topics[i].From, channel) {
-			return &cfg.Topics[i]
+// scoreRows joins the truth, picks each (topic, UTC day) and fills the
+// report's counts. It is pure.
+func scoreRows(rep *EvalReport, truth map[string]storyTruth, dc DecideConfig) {
+	sort.Slice(rep.Rows, func(i, j int) bool {
+		a, b := rep.Rows[i], rep.Rows[j]
+		if a.Topic != b.Topic {
+			return a.Topic < b.Topic
+		}
+		if a.created != b.created {
+			return a.created < b.created
+		}
+		return a.Story < b.Story
+	})
+	groups := map[string][]Candidate{}
+	var order []string
+	models := map[string]bool{}
+	for i := range rep.Rows {
+		row := &rep.Rows[i]
+		models[row.Model] = true
+		if t, ok := truth[row.URL]; ok {
+			row.Truth, row.Excluded, row.Signal, row.Value = t.label, t.excluded, t.signal, t.value
+		}
+		g := row.Topic + " " + row.Day
+		if _, ok := groups[g]; !ok {
+			order = append(order, g)
+		}
+		groups[g] = append(groups[g], Candidate{Story: row.Story, PPost: row.PPost})
+	}
+	picked := map[string]bool{}
+	for _, g := range order {
+		topic, _, _ := strings.Cut(g, " ")
+		for _, c := range RankPick(groups[g], dc.TopKPerDay, dc.MinPPost) {
+			picked[topic+" "+c.Story] = true
 		}
 	}
-	return nil
+	var scores []float64
+	var pos []bool
+	for i := range rep.Rows {
+		row := &rep.Rows[i]
+		row.Picked = picked[row.Topic+" "+row.Story]
+		rep.Stories++
+		if row.Picked {
+			rep.Picked++
+		}
+		switch {
+		case row.Excluded != "":
+			// Graded by its own source's votes (circular): not scored.
+			rep.Excluded++
+			continue
+		case row.Truth == "":
+			rep.Unknown++
+			continue
+		}
+		rep.Scored++
+		scores = append(scores, row.PPost)
+		pos = append(pos, row.Truth == "post")
+		if row.Truth == "post" {
+			rep.Positive++
+		}
+		if row.Picked {
+			rep.PickedScored++
+			if row.Truth == "post" {
+				rep.PickedPositive++
+			}
+		}
+	}
+	rep.Days = len(order)
+	rep.PrecisionAtK = ratio(rep.PickedPositive, rep.PickedScored)
+	rep.RecallPopular = ratio(rep.PickedPositive, rep.Positive)
+	rep.AUC = AUC(scores, pos)
+	for m := range models {
+		rep.Models = append(rep.Models, m)
+	}
+	sort.Strings(rep.Models)
 }
 
-// predictPairs applies the clustering rule to each pair: the same canonical
-// URL, or an embedding cosine JoinRule accepts (asking the decision model in
-// the borderline band when that is on).
-func predictPairs(ctx context.Context, m *Model, cfg *Config, rows []LabelRow) ([]string, error) {
-	var texts []string
-	for _, r := range rows {
-		texts = append(texts, clipText(r.A.Title+"\n"+r.A.Excerpt, maxEmbedText), clipText(r.B.Title+"\n"+r.B.Excerpt, maxEmbedText))
+func utcDate(ms int64) string { return time.UnixMilli(ms).UTC().Format("2006-01-02") }
+
+// previewRows reads every preview-*.jsonl file in dir, oldest file first. A
+// story's first row gives its P(post): a story is decided once, so later
+// rows repeat it.
+func previewRows(dir string) ([]EvalRow, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "preview-*.jsonl"))
+	if err != nil {
+		return nil, err
 	}
-	var vecs [][]float64
-	for start := 0; start < len(texts); start += embedBatch {
-		embs, err := m.Embed(ctx, cfg.EmbedModel, texts[start:min(start+embedBatch, len(texts))])
+	if len(files) == 0 {
+		return nil, fmt.Errorf("eval: no preview-*.jsonl files in %s", dir)
+	}
+	sort.Strings(files)
+	seen := map[string]bool{}
+	var rows []EvalRow
+	for _, f := range files {
+		fh, err := os.Open(f)
 		if err != nil {
 			return nil, err
 		}
-		for _, e := range embs {
-			vecs = append(vecs, unit(e))
-		}
-	}
-	cl := &Clusterer{Cfg: cfg.Cluster, Model: m, DecisionModel: cfg.DecisionModel}
-	out := make([]string, len(rows))
-	for i, r := range rows {
-		ka, kb := canonOf(r.A.Link), canonOf(r.B.Link)
-		same := ka != "" && ka == kb
-		if !same {
-			switch JoinRule(cosine(vecs[2*i], vecs[2*i+1]), cfg.Cluster) {
-			case JoinYes:
-				same = true
-			case JoinAsk:
-				st := &Story{Items: []StoryItem{{Title: r.A.Title, Excerpt: r.A.Excerpt, Link: r.A.Link}}}
-				ok, err := cl.sameStory(ctx, st, Item{Title: r.B.Title, Excerpt: r.B.Excerpt, Target: r.B.Link})
-				if err != nil {
-					return nil, err
-				}
-				same = ok
+		sc := bufio.NewScanner(fh)
+		sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+		for n := 1; sc.Scan(); n++ {
+			if len(strings.TrimSpace(sc.Text())) == 0 {
+				continue
 			}
+			var p PreviewRow
+			if err := json.Unmarshal(sc.Bytes(), &p); err != nil {
+				fh.Close()
+				return nil, fmt.Errorf("%s:%d: %w", f, n, err)
+			}
+			pp, ok := p.Probs["post"]
+			if p.Topic == "" || p.Story == "" || !ok {
+				fh.Close()
+				return nil, fmt.Errorf("%s:%d: want topic, story and probs.post", f, n)
+			}
+			if seen[p.Topic+" "+p.Story] {
+				continue
+			}
+			seen[p.Topic+" "+p.Story] = true
+			rows = append(rows, EvalRow{Topic: p.Topic, Story: p.Story, Day: utcDate(p.Created), URL: p.URL, PPost: pp, Model: p.Model, created: p.Created})
 		}
-		if same {
-			out[i] = "same"
-		} else {
-			out[i] = "different"
+		err = sc.Err()
+		fh.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
 		}
 	}
-	return out, nil
+	return rows, nil
+}
+
+// hubRows reads the source items of the window, groups them as run does and
+// asks the decider about every story of every topic.
+func hubRows(ctx context.Context, o EvalOptions, rep *EvalReport) ([]EvalRow, error) {
+	if o.Hub == nil || o.Model == nil {
+		return nil, fmt.Errorf("eval: the hub window needs a hub and a model (or pass -preview-dir)")
+	}
+	cfg := o.Config
+	items, err := ReadSources(ctx, o.Hub, cfg, o.Log)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := o.Now().UnixMilli() - int64(o.SinceHours)*3600_000
+	var recent []Item
+	for _, it := range items {
+		if it.TS >= cutoff {
+			recent = append(recent, it)
+		}
+	}
+	st := newState()
+	(&Clusterer{Cfg: cfg.Cluster, State: st}).Assign(recent)
+	ids := make([]string, 0, len(st.Stories))
+	for id := range st.Stories {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := st.Stories[ids[i]], st.Stories[ids[j]]
+		if a.Created != b.Created {
+			return a.Created < b.Created
+		}
+		return a.ID < b.ID
+	})
+	var rows []EvalRow
+	for i := range cfg.Topics {
+		t := &cfg.Topics[i]
+		for _, id := range ids {
+			s := st.Stories[id]
+			if !inTopic(t, s) {
+				continue
+			}
+			before, start := o.Model.Meter.Spent(), time.Now()
+			d, err := DecideStory(ctx, o.Model, cfg.DecisionModel, cfg.Decide, t, s, o.Now().UnixMilli())
+			if err != nil {
+				return nil, fmt.Errorf("topic %s story %s: %w", t.Slug, id, err)
+			}
+			rep.Latencies = append(rep.Latencies, time.Since(start))
+			rep.DecideSpend += o.Model.Meter.Spent() - before
+			rep.Decisions++
+			rows = append(rows, EvalRow{Topic: t.Slug, Story: id, Day: utcDate(s.Created), URL: storyURL(s), PPost: d.Probs["post"], Model: d.Model, created: s.Created})
+		}
+	}
+	return rows, nil
 }

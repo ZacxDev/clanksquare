@@ -28,7 +28,6 @@ type PreviewRow struct {
 	Story    string             `json:"story"`
 	Rank     int                `json:"rank"` // 1-based, among every decided story in the window
 	Status   string             `json:"status"`
-	Label    string             `json:"label"` // the probability gate's label (recorded only)
 	Probs    map[string]float64 `json:"probs"`
 	Model    string             `json:"model"`
 	Created  int64              `json:"created"`
@@ -70,7 +69,7 @@ func (r *runner) previewWrite(t *Topic, cs *ChannelState, ranked []string, picke
 			url = st.Canon[0]
 		}
 		row := PreviewRow{RunAt: r.nowMS(), Date: r.previewDate(), Topic: t.Slug, Story: sid, Rank: i + 1, Status: status,
-			Label: d.Label, Probs: d.Probs, Model: d.Model, Created: st.Created, URL: url, Title: oneLine(st.Items[0].Title),
+			Probs: d.Probs, Model: d.Model, Created: st.Created, URL: url, Title: oneLine(st.Items[0].Title),
 			Sources: storySources(st), Budget: r.Config.Decide.TopKPerDay, MinPPost: r.Config.Decide.MinPPost}
 		raw, err := json.Marshal(row)
 		if err != nil {

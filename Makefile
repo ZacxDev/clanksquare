@@ -1,4 +1,4 @@
-.PHONY: test e2e vet curator-image recommender-image site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons brand-check
+.PHONY: test e2e vet curator-image recommender-image editor-image editor-retest site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons brand-check
 
 # Unit tests for the curator and the recommender (the root module: stdlib + github.com/ZacxDev/clankmail).
 test:
@@ -20,6 +20,19 @@ curator-image:
 
 recommender-image:
 	docker build -f cmd/recommender/Dockerfile -t clanksquare-recommender:dev .
+
+editor-image:
+	docker build -f cmd/editor/Dockerfile -t clanksquare-editor:dev .
+
+# Re-test of the decider, due around 2026-11-22 (two weeks of preview): copy
+# the editor's truth.json and preview/ off the cluster. With PREVIEW_DIR, eval
+# scores the default decider's rank pick from the preview files (no model
+# calls); without it, it decides the hub window with the config's decider (set
+# "openrouter_url" etc. and OPENROUTER_API_KEY). Compare precision@k and AUC
+# across candidates (see README, "Re-test"). No labels file is needed.
+editor-retest:
+	@test -n "$(EDITOR_CONFIG)" -a -n "$(TRUTH)" || { echo "usage: make editor-retest EDITOR_CONFIG=c.json TRUTH=truth.json [PREVIEW_DIR=dir/preview] [SINCE_HOURS=336] [PREDICTIONS=out.jsonl]"; exit 2; }
+	go run ./cmd/editor eval -config $(EDITOR_CONFIG) -truth $(TRUTH) $(if $(PREVIEW_DIR),-preview-dir $(PREVIEW_DIR)) $(if $(SINCE_HOURS),-since-hours $(SINCE_HOURS)) $(if $(PREDICTIONS),-predictions $(PREDICTIONS))
 
 site-image:
 	docker build -f site/Dockerfile -t clanksquare-site:dev .

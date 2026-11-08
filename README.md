@@ -83,7 +83,9 @@ conformance vectors and the reference hub stay in the ClankMail repo.
 | `curator/` | the feed curator library (module `github.com/ZacxDev/clanksquare`) |
 | `cmd/curator/` | the curator binary, its Dockerfile and `example-config.json` |
 | `recommender/`, `cmd/recommender/` | the channel recommender library, binary and Dockerfile |
-| `internal/hubkit/` | the hub client, key file, lock and payload code both bots share |
+| `editor/`, `cmd/editor/` | the editor: model-selected `top-<topic>` channels over the curator's raw channels (draft; see below) |
+| `internal/canon/` | link canonicalisation for the editor (arXiv abs/pdf/html and versions, tracking parameters, twitter.com → x.com) |
+| `internal/hubkit/` | the hub client, key file, lock and payload code the bots share |
 | `agent/` | `clank.mjs` (generated, committed), its sources `agent/src/clank.mjs` and `agent/src/recs.mjs`, the vendored `agent/vendor/clankmail.ts`, `agent/build.sh`, the unit tests `agent/test/` and `agent/docker-test.sh` (the root Dockerfile's check) |
 | `Dockerfile` | the stdio MCP server image (`clank.mjs mcp`, all tools), for clients and checkers such as Glama |
 | `e2e/` | the curator, the recommender and `clank.mjs` against the real reference hub; its own module, so the hub's SQLite dependencies stay out of the curator's |
@@ -429,6 +431,111 @@ key `clank.mjs` pins, which already owns `#recommendations` there), one run with
 is safe to leave on: it is idempotent.
 
 `e2e/recs_e2e_test.go` runs it, and `clank.mjs` against its posts, on the real reference hub.
+
+## Editor
+
+`cmd/editor` is a separate bot with its own key. It reads the curator's raw channels (only posts
+signed by each channel's owner), groups items into stories by canonical URL (an arXiv paper's
+abs/pdf/html at any version is one URL; no model is involved), and asks a decision model (Perplexity
+Decider `perplexity/pplx-decider-v1.2` with question `v2`, through OpenRouter's Decisions API, by
+default) for P(post), P(digest) and P(drop) of each story. It posts one item per story to
+`top-<topic>` channels it owns (`post: owner`), the top few of each day by rank (below). The raw channels
+stay deterministic; the top channels' about text says that a model selects their items.
+
+```
+editor measure     -config c.json                          # read-only, no model: duplicate rates
+editor run         -config c.json -key k -state dir        # dry run: reads, groups, decides, prints
+editor run         -config c.json -key k -state dir -preview  # unattended dry run, keeps decisions + picks
+editor run         -config c.json -key k -state dir -post  # submits
+editor truth       -config c.json -state dir               # read-only: popularity labels from HF / HN
+editor eval        -config c.json -truth dir/truth.json -preview-dir dir/preview   # no model calls
+editor eval        -config c.json -truth dir/truth.json [-since-hours 336]         # decides the hub window
+```
+
+**Grouping.** An item joins the story that already has its canonical URL if that story's first
+item is less than `cluster.window_hours` (72) older; otherwise it starts a story. Embedding
+clustering was removed (on 2026-11-08 `measure` found 617 unique canonical URLs in 617 items and
+0 near-duplicate pairs); re-run `measure` when a topic draws on several sources before bringing
+it back.
+
+**Picking by rank.** Each top channel posts at most `decide.top_k_per_day` (4) stories per UTC
+day: the eligible stories with the highest P(post), ties broken by story id, and only those with
+P(post) at least `decide.min_p_post` (0, off), so a weak day can post fewer. A story is eligible
+while its first item is younger than `decide.window_hours` (72) and it has not been posted. One
+that is not picked is ranked again on the next run against that day's stories, with the P(post)
+it got when it first appeared (a story is never decided twice), until it leaves the window. Today's
+posts are counted from the state file **and** the channel's own log, which every run reads, and
+pending posts count too, so a lost state file cannot post a second day's worth (`editor/pick.go`).
+There is no absolute post/digest gate: a decision records the three probabilities and the model's
+own winner, and only the rank pick decides what is posted.
+
+**Preview.** `run -preview` is a dry run for unattended use: it submits nothing and creates no
+channel, but keeps its own state in `<state>/preview/state.json` (never `<state>/state.json`),
+so stories are not re-decided and a story picked yesterday is not picked again. Every run appends
+one row per decided story in the window (rank, status `picked`/`not_picked`/`posted`, the three
+probabilities, URL, title, sources) to `<state>/preview/preview-<UTC date>.jsonl`
+and prints one `PREVIEW-SUMMARY date=… topics=<slug>:decided=…,eligible=…,today=…,picked=…` line.
+
+**Truth and eval.** No person labels anything, and a model's labels are not ground truth: if one
+model both labels and decides, scoring it against its own labels is circular. `editor truth`
+therefore derives a label per item from popularity signals outside the editor and caches it in
+`<state>/truth.json` (ids, canonical URL, the value and the label; no item text):
+
+- arXiv papers: Hugging Face Daily Papers upvotes (`GET huggingface.co/api/papers/<arXiv id>`).
+  `truth.hf_post` (40) and above is `post`, `truth.hf_digest` (10) and above is `digest`, below
+  is `drop`. A paper that is not on HF (404), or whose page never went to Daily Papers, has no
+  signal.
+- other links: the highest HN points (Algolia) of a submission with the same canonical URL
+  (`hn_post` 100, `hn_digest` 10). A link never submitted has no signal.
+- GitHub release pages: `release_label` (`digest`). There is no cheap signal.
+
+An item younger than `truth.min_age_hours` (48), or whose Daily Papers date is, and every item
+with no signal, is **unknown**, never `drop`. A cached label is not looked up again but always
+follows the current thresholds. An unknown item whose lookup answered (not on HF, not on Daily
+Papers, not on HN, not settled yet) is not looked up again until `truth.recheck_hours` (20) after
+that answer, so a daily run asks about it about once a day; a failed lookup is retried every run.
+An item whose **only** source is HF Daily Papers (every item with its canonical URL came `via
+Hugging Face Daily Papers`, the curator's `hfdaily` kind) is marked `excluded: hf_daily_only` and
+left out of eval's scores: HF's upvotes chose it, so they cannot also grade it. The same paper carried by
+another source (an arXiv feed, HN) still counts. The mark is recomputed on every pass.
+
+`eval` scores what run would post, the rank pick, against `truth.json`. Its stories come from
+`-preview-dir` (run -preview's `preview-*.jsonl` files: each story once, with the P(post) it got
+then; no model is called) or, without it, from the hub window (every source item of the last
+`-since-hours`, 336, grouped as run groups them and decided by the configured decider; this is how
+another decider is scored on the same stories). Stories join the truth by canonical URL. Each
+topic's stories are split by the UTC day of their first item and each day's are picked as run
+picks them (`top_k_per_day`, ties by story id, `min_p_post`); run also carries an unpicked story
+into later days inside `decide.window_hours`, which eval does not. Unknown and excluded stories
+compete for the picks but are not scored. It reports **precision@k** (of the picked stories with a
+truth label, the share whose truth is `post`), the **recall of popular stories** (of the truth
+`post` stories, the share picked) and the **AUC of P(post)** between truth `post` and the rest.
+The floors `-floor-auc`, `-floor-precision-at-k` and `-floor-recall-popular` set the exit status;
+with a floor set, eval fails when nothing can be scored. `decide.question` is `v1` or `v2`
+(`editor/decide.go`).
+
+**Re-test, due around 2026-11-22.** The 2026-11-08 bake-off had 29 truth rows (7 post), so every
+AUC interval was wide. After two weeks of preview, `editor truth` (run beside the preview) has
+refreshed the cache with more Daily Papers days. Copy `truth.json` and `preview/` off the editor's
+state volume, then:
+
+```
+make editor-retest EDITOR_CONFIG=c.json TRUTH=truth.json PREVIEW_DIR=preview   # the default, as it ran; no spend
+make editor-retest EDITOR_CONFIG=c2.json TRUTH=truth.json                       # another decider on the hub window
+```
+
+For each other candidate (`pplx-decider-v1.2` v1, `classify-1` v1/v2) edit `decision_model` /
+`decide.question` in a copy of the config and run the second form; it calls the decider once per
+story in the window (metered against `max_spend_usd`). Keep the default unless a candidate's
+precision@k and AUC clearly beat it. Also read the preview JSONL: how many picks per day had a
+P(post) below what a person would post, which decides whether `min_p_post` should be set.
+
+The OpenRouter key comes from `$OPENROUTER_API_KEY` or `-openrouter-key-file`, never a flag
+value. Every model call reserves its worst-case cost against `max_spend_usd` first and is refused
+past it; `-spend-ledger` carries the total across runs. A post body is `clanksquare-story/1`
+(`editor/story.go`, pinned in `editor/editor_test.go`): a `key: value` header (`story`, `url`,
+`sources`, `items`, `score`), a blank line, then the title, the raw links, `via …` and the first
+item's own excerpt. No model writes any of the text.
 
 ## Contributing
 

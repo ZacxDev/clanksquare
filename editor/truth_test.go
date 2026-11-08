@@ -51,10 +51,11 @@ type truthFixture struct {
 	*runFixture
 	hf, hn  *httptest.Server
 	hfCalls int
+	at      time.Duration // now, after t0 (default 50h)
 }
 
 func newTruthFixture(t *testing.T, papers map[string]string, hnHits map[string][]map[string]any) *truthFixture {
-	f := &truthFixture{runFixture: newRunFixture(t)}
+	f := &truthFixture{runFixture: newRunFixture(t), at: 50 * time.Hour}
 	rawPost(t, f.hub, f.curator, f.rawID, "News", "https://news.example/story", "A story.", ms(-3*time.Hour))
 	rawPost(t, f.hub, f.curator, f.rawID, "Big news", "https://news.example/big", "A big story.", ms(-3*time.Hour))
 	rawPost(t, f.hub, f.curator, f.rawID, "Release", "https://github.com/o/r/releases/tag/v1", "v1.", ms(-3*time.Hour))
@@ -85,7 +86,7 @@ func newTruthFixture(t *testing.T, papers map[string]string, hnHits map[string][
 func (f *truthFixture) truth(t *testing.T, refresh bool) *TruthReport {
 	t.Helper()
 	rep, err := Truth(context.Background(), TruthOptions{Config: f.cfg, Hub: NewHub(f.hub.srv.URL, nil), StateDir: f.dir, Refresh: refresh,
-		Now: func() time.Time { return t0.Add(50 * time.Hour) }, HFBase: f.hf.URL, HNBase: f.hn.URL})
+		Now: func() time.Time { return t0.Add(f.at) }, HFBase: f.hf.URL, HNBase: f.hn.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,8 @@ func TestTruthNoSignalIsUnknown(t *testing.T) {
 }
 
 // TestTruthCacheRelabelsAndRetriesUnknown: a cached label is not looked up
-// again but follows new thresholds; an unknown row is looked up again.
+// again but follows new thresholds; an unknown row is looked up again once
+// its answer is recheck_hours (20) old, and not before.
 func TestTruthCacheRelabelsAndRetriesUnknown(t *testing.T) {
 	daily := "2026-11-08T00:00:00.000Z"
 	papers := map[string]string{"2610.00001": fmt.Sprintf(`{"id":"2610.00001","upvotes":40,"submittedOnDailyAt":%q}`, daily)}
@@ -165,9 +167,17 @@ func TestTruthCacheRelabelsAndRetriesUnknown(t *testing.T) {
 	}
 	f.cfg.Truth.HFPost = 41
 	papers["2610.00003"] = fmt.Sprintf(`{"id":"2610.00003","upvotes":12,"submittedOnDailyAt":%q}`, daily)
+	// 1 ms short of recheck_hours: B and C (unknown) are not asked again.
+	f.at += 20*time.Hour - time.Millisecond
+	// The one hf call is Fresh, now old enough (too_new is no answer).
+	if rep := f.truth(t, false); f.hfCalls != 4 || rep.Deferred != 4 { // B, C, News, Big news
+		t.Fatalf("pass inside recheck_hours: hf calls = %d (want 4), deferred = %d (want 4)", f.hfCalls, rep.Deferred)
+	}
+	// At recheck_hours they are asked again (Fresh's answer is younger).
+	f.at += time.Millisecond
 	rep := f.truth(t, false)
-	if f.hfCalls != 5 { // B and C again, not A
-		t.Fatalf("second pass hf calls = %d, want 5", f.hfCalls)
+	if f.hfCalls != 6 { // B and C again, not A, not Fresh
+		t.Fatalf("pass at recheck_hours: hf calls = %d, want 6", f.hfCalls)
 	}
 	got := byTitle(t, f, rep.Rows)
 	if got["Paper A"].Label != "digest" || got["Paper C"].Label != "digest" {

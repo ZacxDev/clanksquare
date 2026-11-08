@@ -83,8 +83,11 @@ type EvalOptions struct {
 // Axis1 scores the decisions against the popularity truth: the only axis
 // eval gates on.
 type Axis1 struct {
-	Rows     int   // item rows with a truth label
-	Unknown  int   // item rows whose truth is unknown (not scored)
+	Rows    int // item rows with a truth label
+	Unknown int // item rows whose truth is unknown (not scored)
+	// Excluded: item rows whose truth row is excluded from axis 1
+	// (TruthRow.Excluded, e.g. hf_daily_only), not scored.
+	Excluded int
 	Items    []PRF // per label, against the truth
 	Positive int   // rows whose truth is post (the popular items)
 	// PrecisionPost: of the rows decided post, the share whose truth is post.
@@ -219,8 +222,8 @@ func (r *EvalReport) Write(w io.Writer) {
 			r.DecideSpend*100/float64(r.Decisions), (sum / time.Duration(len(lat))).Milliseconds(), lat[len(lat)/2].Milliseconds(), lat[min(len(lat)-1, len(lat)*95/100)].Milliseconds())
 	}
 	if a := r.Axis1; a != nil {
-		fmt.Fprintf(w, "axis1 (popularity truth) rows=%d unknown=%d popular=%d predicted_post=%d auc=%.3f precision_at_post=%.3f recall_popular=%.3f\n",
-			a.Rows, a.Unknown, a.Positive, a.PredictedPost, a.AUC, a.PrecisionPost, a.RecallPopular)
+		fmt.Fprintf(w, "axis1 (popularity truth) rows=%d unknown=%d excluded=%d popular=%d predicted_post=%d auc=%.3f precision_at_post=%.3f recall_popular=%.3f\n",
+			a.Rows, a.Unknown, a.Excluded, a.Positive, a.PredictedPost, a.AUC, a.PrecisionPost, a.RecallPopular)
 		for _, p := range a.Items {
 			fmt.Fprintf(w, "axis1 label=%s support=%d precision=%.3f recall=%.3f f1=%.3f\n", p.Label, p.Support, p.Precision(), p.Recall(), p.F1())
 		}
@@ -260,8 +263,14 @@ func Eval(ctx context.Context, o EvalOptions) (*EvalReport, error) {
 		t := r.Truth(o.HumanOnly)
 		pop := ""
 		if r.Kind == "item" && o.Truth != nil {
-			pop = o.Truth[r.ID].Label
-			if pop == "" {
+			tr := o.Truth[r.ID]
+			pop = tr.Label
+			switch {
+			case tr.Excluded != "":
+				// Graded by its own source's votes (circular): not axis 1.
+				pop = ""
+				a1.Excluded++
+			case pop == "":
 				a1.Unknown++
 			}
 		}

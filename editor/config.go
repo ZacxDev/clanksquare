@@ -44,6 +44,11 @@ type Config struct {
 // signal at all, are unknown.
 type TruthConfig struct {
 	MinAgeHours int `json:"min_age_hours"`
+	// RecheckHours: an item whose lookup answered "no signal" (not on HF,
+	// not on Daily Papers, not on HN, not settled yet) is not looked up again
+	// until this many hours after that answer (default 20, so a daily run
+	// re-checks it about once a day). A failed lookup is retried every run.
+	RecheckHours int `json:"recheck_hours,omitempty"`
 	// HF Daily Papers upvotes, for arXiv papers.
 	HFPost   int `json:"hf_post"`
 	HFDigest int `json:"hf_digest"`
@@ -71,13 +76,31 @@ type ClusterConfig struct {
 	WindowHours  int     `json:"window_hours"`
 }
 
-// DecideConfig holds the decision thresholds. Classify-1 always returns a
-// winner, so the gate is on probabilities, not on the winner: a story is
-// posted only if P(post) >= Post, sent to the digest only if P(digest) >=
-// Digest, and dropped otherwise.
+// DecideConfig holds the decision settings.
+//
+// What a run POSTS is chosen by rank, not by an absolute threshold: each top
+// channel posts at most TopKPerDay stories per UTC day, the eligible stories
+// with the highest P(post) (ties by story id), and only those with P(post) >=
+// MinPPost (0 = no floor). A story is eligible while its first item is less
+// than WindowHours old and it has not been posted; one not picked today is
+// ranked again tomorrow against that day's stories, until it leaves the window
+// (see pick.go).
+//
+// Post and Digest are the probability gate recorded as each decision's label
+// (post if P(post) >= Post, else digest if P(digest) >= Digest, else drop).
+// The label is what eval scores and what `digest` records; it no longer
+// decides what is posted.
 type DecideConfig struct {
 	Post   float64 `json:"post"`
 	Digest float64 `json:"digest"`
+	// TopKPerDay is the per-channel daily post budget (default 4).
+	TopKPerDay int `json:"top_k_per_day,omitempty"`
+	// MinPPost is an optional absolute floor on P(post) for a pick (default
+	// 0: off), so a day with nothing good posts fewer than TopKPerDay.
+	MinPPost float64 `json:"min_p_post,omitempty"`
+	// WindowHours: a story is eligible for a pick while its first item is
+	// younger than this (default 72).
+	WindowHours int `json:"window_hours,omitempty"`
 	// Question is the wording asked: "v1" (topicality and notability) or
 	// "v2" (the rubric, framed as notability for agent and LLM builders).
 	Question string `json:"question,omitempty"`
@@ -121,7 +144,7 @@ func (c *Config) Defaults() {
 		c.EmbedModel = "openai/text-embedding-3-small"
 	}
 	if c.DecisionModel == "" {
-		c.DecisionModel = "scaledown/classify-1-20260928"
+		c.DecisionModel = DefaultDecisionModel
 	}
 	if c.LabelModel == "" {
 		c.LabelModel = "deepseek/deepseek-v4.1-flash"
@@ -156,13 +179,22 @@ func (c *Config) Defaults() {
 		c.Decide.Digest = 0.5
 	}
 	if c.Decide.Question == "" {
-		c.Decide.Question = "v1"
+		c.Decide.Question = "v2"
+	}
+	if c.Decide.TopKPerDay == 0 {
+		c.Decide.TopKPerDay = 4
+	}
+	if c.Decide.WindowHours == 0 {
+		c.Decide.WindowHours = 72
 	}
 	if c.Decide.API == "" {
 		c.Decide.API = "decisions"
 	}
 	if c.Truth.MinAgeHours == 0 {
 		c.Truth.MinAgeHours = 48
+	}
+	if c.Truth.RecheckHours == 0 {
+		c.Truth.RecheckHours = 20
 	}
 	if c.Truth.HFPost == 0 {
 		c.Truth.HFPost = DefaultHFPost
@@ -185,6 +217,14 @@ func (c *Config) Defaults() {
 		}
 	}
 }
+
+// DefaultDecisionModel is the decider a config gets when it names none:
+// Perplexity Decider v1.2 with question v2. In the 2026-11-08 bake-off (314
+// #llm-papers items, 29 with popularity truth, 7 of them post) it had the best
+// AUC of P(post), 0.799, and the only bootstrap 95% interval excluding 0.5
+// ([0.62, 0.94]); its P(post) never reached the old 0.6 gate, which is why
+// posting is by rank (DecideConfig).
+const DefaultDecisionModel = "perplexity/pplx-decider-v1.2"
 
 // DefaultHFPost and DefaultHFDigest are the HF Daily Papers upvote
 // thresholds. Measured 2026-11-08 over every paper HF listed on Daily Papers
@@ -234,6 +274,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Decide.Post <= 0 || c.Decide.Post > 1 || c.Decide.Digest <= 0 || c.Decide.Digest > 1 {
 		return fmt.Errorf("decide: thresholds must be in (0, 1]")
+	}
+	if c.Decide.TopKPerDay < 1 || c.Decide.TopKPerDay > 50 {
+		return fmt.Errorf("decide: top_k_per_day must be 1-50")
+	}
+	if c.Decide.MinPPost < 0 || c.Decide.MinPPost > 1 {
+		return fmt.Errorf("decide: min_p_post must be in [0, 1]")
+	}
+	if c.Decide.WindowHours < 1 || c.Decide.WindowHours > 24*14 {
+		return fmt.Errorf("decide: window_hours must be 1-336")
+	}
+	if c.Truth.RecheckHours < 1 {
+		return fmt.Errorf("truth: recheck_hours must be >= 1")
 	}
 	if c.Decide.Question != "v1" && c.Decide.Question != "v2" {
 		return fmt.Errorf("decide: question must be v1 or v2")

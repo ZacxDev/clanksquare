@@ -408,20 +408,40 @@ is safe to leave on: it is idempotent.
 ## Editor
 
 `cmd/editor` is a separate bot with its own key. It reads the curator's raw channels (only posts
-signed by each channel's owner), groups items into stories, and asks a decision model (ScaleDown
-Classify-1 through OpenRouter's Decisions API) whether to `post`, `digest` or `drop` each story.
-It posts one item per story to `top-<topic>` channels it owns (`post: owner`). The raw channels
+signed by each channel's owner), groups items into stories, and asks a decision model (Perplexity
+Decider `perplexity/pplx-decider-v1.2` with question `v2`, through OpenRouter's Decisions API, by
+default) for P(post), P(digest) and P(drop) of each story. It posts one item per story to
+`top-<topic>` channels it owns (`post: owner`), the top few of each day by rank (below). The raw channels
 stay deterministic; the top channels' about text says that a model selects their items.
 
 ```
 editor measure     -config c.json                          # read-only, no model: duplicate rates
 editor run         -config c.json -key k -state dir        # dry run: reads, clusters, decides, prints
+editor run         -config c.json -key k -state dir -preview  # unattended dry run, keeps decisions + picks
 editor run         -config c.json -key k -state dir -post  # submits
 editor label-draft -config c.json -out labels.jsonl        # draft labels (DeepSeek V4.1 Flash)
 editor truth       -config c.json -state dir               # read-only: popularity labels from HF / HN
 editor eval        -config c.json -labels labels.jsonl -truth dir/truth.json
 editor agree       -config c.json                          # read-only: HN / Lobsters for 48h+ items
 ```
+
+**Picking by rank.** Each top channel posts at most `decide.top_k_per_day` (4) stories per UTC
+day: the eligible stories with the highest P(post), ties broken by story id, and only those with
+P(post) at least `decide.min_p_post` (0, off), so a weak day can post fewer. A story is eligible
+while its first item is younger than `decide.window_hours` (72) and it has not been posted. One
+that is not picked is ranked again on the next run against that day's stories, with the P(post)
+it got when it first appeared (a story is never decided twice), until it leaves the window. Today's
+posts are counted from the state file **and** the channel's own log, which every run reads, and
+pending posts count too, so a lost state file cannot post a second day's worth (`editor/pick.go`).
+`decide.post`/`decide.digest` are still each decision's recorded label (and what eval scores);
+`digest` is recorded only, there is no digest channel.
+
+**Preview.** `run -preview` is a dry run for unattended use: it submits nothing and creates no
+channel, but keeps its own state in `<state>/preview/state.json` (never `<state>/state.json`),
+so stories are not re-decided and a story picked yesterday is not picked again. Every run appends
+one row per decided story in the window (rank, status `picked`/`not_picked`/`posted`, the three
+probabilities, the gate label, URL, title, sources) to `<state>/preview/preview-<UTC date>.jsonl`
+and prints one `PREVIEW-SUMMARY date=… topics=<slug>:decided=…,eligible=…,today=…,picked=…` line.
 
 **Truth and eval.** No person labels anything, and a model's labels are not ground truth: if one
 model both labels and decides, scoring it against its own labels is circular. `editor truth`
@@ -438,7 +458,13 @@ therefore derives a label per item from popularity signals outside the editor an
 
 An item younger than `truth.min_age_hours` (48), or whose Daily Papers date is, and every item
 with no signal, is **unknown**, never `drop`. A cached label is not looked up again but always
-follows the current thresholds; unknown items are looked up again on the next run.
+follows the current thresholds. An unknown item whose lookup answered (not on HF, not on Daily
+Papers, not on HN, not settled yet) is not looked up again until `truth.recheck_hours` (20) after
+that answer, so a daily run asks about it about once a day; a failed lookup is retried every run.
+An item whose **only** source is HF Daily Papers (every item with its canonical URL came `via
+Hugging Face Daily Papers`, the curator's `hfdaily` kind) is marked `excluded: hf_daily_only` and
+left out of axis 1: HF's upvotes chose it, so they cannot also grade it. The same paper carried by
+another source (an arXiv feed, HN) still counts. The mark is recomputed on every pass.
 
 `eval` scores on two axes. **Axis 1**, against the popularity truth: precision of `post`, recall
 of the popular (truth `post`) items, and the AUC of P(post) between truth `post` and the rest.
@@ -448,6 +474,16 @@ agreement with a model, not truth. Only axis 1 has floors (`-floor-auc`,
 when axis 1 cannot be scored. `decide.api` is `decisions` (the Decisions API) or `chat` (a chat
 model answering the three probabilities as structured output), and `decide.question` is `v1` or
 `v2` (`editor/decide.go`).
+
+**Re-test, due around 2026-11-22.** The 2026-11-08 bake-off had 29 truth rows (7 post), so every
+AUC interval was wide. After two weeks of preview, `editor truth` (run beside the preview) has
+refreshed the cache with more Daily Papers days. Re-run the bake-off then: copy `truth.json` off
+the editor's state volume, and for each candidate (`pplx-decider-v1.2` v1/v2, `classify-1` v1/v2,
+the DeepSeek chat decider) run `make editor-retest EDITOR_CONFIG=<config with that
+decision_model/question/api> LABELS=<labels.jsonl> TRUTH=<truth.json>`, then compare AUC on axis
+1. Keep the default unless a candidate's bootstrap interval clearly beats it. Also read the
+preview JSONL: how many picks per day had P(post) below what a person would post, which decides
+whether `min_p_post` should be set.
 
 The OpenRouter key comes from `$OPENROUTER_API_KEY` or `-openrouter-key-file`, never a flag
 value. Every model call reserves its worst-case cost against `max_spend_usd` first and is refused

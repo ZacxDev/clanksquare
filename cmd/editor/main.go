@@ -4,6 +4,7 @@
 //
 //	editor measure     -config c.json                       # read-only, no model
 //	editor run         -config c.json -key k -state dir     # dry run (default)
+//	editor run         -config c.json -key k -state dir -preview  # dry run that keeps decisions + picks
 //	editor run         -config c.json -key k -state dir -post
 //	editor label-draft -config c.json -out labels.jsonl -items 200 -pairs 200
 //	editor truth       -config c.json -state dir              # read-only: HF/HN popularity labels
@@ -62,6 +63,7 @@ func run(args []string) int {
 		fs.StringVar(&o.KeyPath, "key", "", "editor key file (required)")
 		fs.StringVar(&o.StateDir, "state", "", "state directory (cluster state, pending posts, lock)")
 		fs.BoolVar(&o.Post, "post", false, "actually submit to the hub; without it the run is a dry run that submits nothing and writes no state")
+		fs.BoolVar(&o.Preview, "preview", false, "dry run that keeps its decisions and simulated picks in <state>/preview/ and appends them, with scores, to <state>/preview/preview-<UTC date>.jsonl; submits nothing")
 	case "label-draft":
 		fs.StringVar(&o.Out, "out", "", "JSONL file to write (required)")
 		fs.IntVar(&o.NItems, "items", 200, "item labels to draft")

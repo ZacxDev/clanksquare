@@ -58,6 +58,15 @@ func TestRunWithoutPostFlagSubmitsNothing(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d, want 1 (missing source channel)", code)
 	}
+	// -preview submits nothing either, and -preview -post is refused.
+	code = run([]string{"run", "-config", cfgPath, "-key", keyPath, "-state", state, "-preview"})
+	if submits.Load() != 0 || code != 1 {
+		t.Fatalf("run -preview: exit %d, %d submit(s)", code, submits.Load())
+	}
+	code = run([]string{"run", "-config", cfgPath, "-key", keyPath, "-state", state, "-preview", "-post"})
+	if submits.Load() != 0 || code != 1 {
+		t.Fatalf("run -preview -post: exit %d, %d submit(s)", code, submits.Load())
+	}
 }
 
 func TestKeyIsNeverAFlag(t *testing.T) {

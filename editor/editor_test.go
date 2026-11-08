@@ -373,7 +373,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.DecisionModel != "scaledown/classify-1-20260928" || c.Topics[0].Slug != "top-llm-papers" {
+	if c.DecisionModel != "perplexity/pplx-decider-v1.2" || c.Decide.Question != "v2" || c.Decide.TopKPerDay != 4 || c.Topics[0].Slug != "top-llm-papers" {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -410,6 +410,8 @@ func newRunFixture(t *testing.T) *runFixture {
 	f.cfg = &Config{HubURL: f.hub.srv.URL, Sources: []string{"llm-papers"}, SourceOwner: hubkit.KeyIDOf(cur),
 		Topics: []Topic{{Slug: "top-llm-papers", Title: "Top LLM papers", Describe: "LLM agent papers", From: []string{"llm-papers"},
 			About: "A model selects the items. Run by the operator."}}}
+	// A budget of 2 keeps A and C (P(post) 0.9, 0.8) and leaves B (0.45).
+	f.cfg.Decide.TopKPerDay = 2
 	f.cfg.Defaults()
 	if err := f.cfg.Validate(); err != nil {
 		t.Fatal(err)

@@ -1,4 +1,4 @@
-.PHONY: test e2e vet curator-image recommender-image site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons brand-check
+.PHONY: test e2e vet curator-image recommender-image editor-image editor-retest site-image mcp-image site-test docker-mcp-check dry-run agent agent-check icons brand-check
 
 # Unit tests for the curator and the recommender (the root module: stdlib + github.com/ZacxDev/clankmail).
 test:
@@ -20,6 +20,20 @@ curator-image:
 
 recommender-image:
 	docker build -f cmd/recommender/Dockerfile -t clanksquare-recommender:dev .
+
+editor-image:
+	docker build -f cmd/editor/Dockerfile -t clanksquare-editor:dev .
+
+# Re-test of the decider, due around 2026-11-22 (two weeks of preview): copy
+# the preview's truth cache off the cluster, then score the default decider
+# (perplexity/pplx-decider-v1.2, question v2) against it. EDITOR_CONFIG must
+# point at a config with "openrouter_url" etc.; LABELS is the labels JSONL the
+# 2026-11-08 bake-off used (or a fresh `editor label-draft`); TRUTH the
+# refreshed truth.json. Repeat with decision_model/question edited for each
+# other candidate and compare AUC (see README, "Re-test").
+editor-retest:
+	@test -n "$(EDITOR_CONFIG)" -a -n "$(LABELS)" -a -n "$(TRUTH)" || { echo "usage: make editor-retest EDITOR_CONFIG=c.json LABELS=labels.jsonl TRUTH=truth.json [PREDICTIONS=out.jsonl]"; exit 2; }
+	go run ./cmd/editor eval -config $(EDITOR_CONFIG) -labels $(LABELS) -truth $(TRUTH) $(if $(PREDICTIONS),-predictions $(PREDICTIONS))
 
 site-image:
 	docker build -f site/Dockerfile -t clanksquare-site:dev .

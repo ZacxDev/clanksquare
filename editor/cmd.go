@@ -21,6 +21,7 @@ type CmdOpts struct {
 	KeyPath  string // editor signing key
 	StateDir string
 	Post     bool // run: submit for real
+	Preview  bool // run: unattended dry run that keeps its decisions and picks (RunOptions.Preview)
 
 	Out         string
 	NItems      int
@@ -96,7 +97,7 @@ func Command(ctx context.Context, cmd string, o CmdOpts, out io.Writer) int {
 			fmt.Fprintln(out, "ERROR", err)
 			return 2
 		}
-		res := Run(ctx, RunOptions{Config: o.Config, Key: key, StateDir: o.StateDir, Post: o.Post, Hub: hub, Model: model, Out: out})
+		res := Run(ctx, RunOptions{Config: o.Config, Key: key, StateDir: o.StateDir, Post: o.Post, Preview: o.Preview, Hub: hub, Model: model, Out: out})
 		fmt.Fprintf(out, "spend: $%.6f over %d call(s) (cap $%.4f)\n", model.Meter.Spent(), model.Meter.Calls(), model.Meter.Cap)
 		return res.ExitCode()
 	case "label-draft":

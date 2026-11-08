@@ -42,6 +42,53 @@ type TruthRow struct {
 	Label     string `json:"label"`
 	Why       string `json:"why,omitempty"`
 	CheckedAt int64  `json:"checked_at"`
+	// Excluded, when set, keeps the row out of eval's axis 1 whatever its
+	// label: "hf_daily_only" is an item whose only source is HF Daily Papers,
+	// which HF's own upvotes would grade (circular; see hfDailyOnly).
+	Excluded string `json:"excluded,omitempty"`
+}
+
+// HFDailyVia is the via label the curator's hfdaily source kind always
+// writes (curator.HFDailySource; the curator rejects a name override for that
+// kind, so the label is fixed).
+const HFDailyVia = "Hugging Face Daily Papers"
+
+// ExcludedHFDailyOnly is TruthRow.Excluded for an item only HF Daily Papers
+// carried.
+const ExcludedHFDailyOnly = "hf_daily_only"
+
+// hfDailyOnly returns the ids of the items whose only source is HF Daily
+// Papers: every item read with the same canonical URL (itself included) came
+// via HFDailyVia. An item that some other source also carried still counts:
+// that source picked it without looking at HF's votes.
+func hfDailyOnly(items []Item) map[string]bool {
+	key := func(it Item) string {
+		if it.Canon != "" {
+			return it.Canon
+		}
+		return "id:" + it.ID
+	}
+	other := map[string]bool{}
+	for _, it := range items {
+		if it.Via != HFDailyVia {
+			other[key(it)] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, it := range items {
+		if it.Via == HFDailyVia && !other[key(it)] {
+			out[it.ID] = true
+		}
+	}
+	return out
+}
+
+// recheckable are the unknown answers a lookup gave: cached for
+// truth.recheck_hours. A failed lookup ("lookup_failed") is not an answer
+// and is retried on every run; too_new and no_url make no request.
+var recheckable = map[string]bool{
+	"not_on_hf": true, "not_on_daily": true, "unsettled": true, "no_upvotes_field": true,
+	"bad_daily_date": true, "not_on_hn": true,
 }
 
 // TruthLabel maps a signal value to a label: post at or above post, digest
@@ -137,6 +184,11 @@ type TruthReport struct {
 	Why      map[string]int            // reason -> n, for unknown rows
 	Lookups  int
 	Cached   int
+	// Deferred: unknown rows not looked up again because their last answer
+	// is younger than truth.recheck_hours.
+	Deferred int
+	// Excluded: rows kept out of axis 1 (hf_daily_only).
+	Excluded int
 	Cfg      TruthConfig
 }
 
@@ -275,12 +327,17 @@ func Truth(ctx context.Context, o TruthOptions) (*TruthReport, error) {
 	now := o.Now().UnixMilli()
 	rep := &TruthReport{Items: map[string]int{}, Eligible: map[string]int{}, Labelled: map[string]int{},
 		Labels: map[string]map[string]int{}, Why: map[string]int{}, Cfg: o.Config.Truth}
+	recheck := int64(o.Config.Truth.RecheckHours) * 3600_000
 	for _, it := range items {
 		if old, ok := rows[it.ID]; ok && old.Label != "" && !o.Refresh {
 			// The cache keeps the measurement; the label always follows the
 			// current thresholds.
 			rows[it.ID] = relabel(old, o.Config.Truth)
 			rep.Cached++
+			continue
+		}
+		if old, ok := rows[it.ID]; ok && old.Label == "" && recheckable[old.Why] && now-old.CheckedAt < recheck && !o.Refresh {
+			rep.Deferred++
 			continue
 		}
 		row := o.truthFor(ctx, it, now)
@@ -295,6 +352,18 @@ func Truth(ctx context.Context, o TruthOptions) (*TruthReport, error) {
 			}
 		}
 		rows[it.ID] = row
+	}
+	// Recomputed on every pass from the items read now, so an item that a
+	// second source later carries is scored again.
+	only := hfDailyOnly(items)
+	for _, it := range items {
+		r := rows[it.ID]
+		r.Excluded = ""
+		if only[it.ID] {
+			r.Excluded = ExcludedHFDailyOnly
+			rep.Excluded++
+		}
+		rows[it.ID] = r
 	}
 	if err := writeTruth(TruthPath(o.StateDir), rows); err != nil {
 		return nil, err
@@ -337,8 +406,8 @@ func Quantile(sorted []int, q float64) int {
 // and the label counts.
 func (r *TruthReport) Write(w io.Writer) {
 	c := r.Cfg
-	fmt.Fprintf(w, "truth min_age_hours=%d hf post>=%d digest>=%d hn post>=%d digest>=%d release=%s lookups=%d cached=%d\n",
-		c.MinAgeHours, c.HFPost, c.HFDigest, c.HNPost, c.HNDigest, c.ReleaseLabel, r.Lookups, r.Cached)
+	fmt.Fprintf(w, "truth min_age_hours=%d recheck_hours=%d hf post>=%d digest>=%d hn post>=%d digest>=%d release=%s lookups=%d cached=%d deferred=%d excluded_hf_daily_only=%d\n",
+		c.MinAgeHours, c.RecheckHours, c.HFPost, c.HFDigest, c.HNPost, c.HNDigest, c.ReleaseLabel, r.Lookups, r.Cached, r.Deferred, r.Excluded)
 	for _, ch := range r.Channels {
 		l := r.Labels[ch]
 		fmt.Fprintf(w, "channel=%s items=%d old_enough=%d labelled=%d coverage=%.3f (of old enough) post=%d digest=%d drop=%d\n",

@@ -25,11 +25,20 @@ type RunOptions struct {
 	// Post submits to the hub. Without it the run is a dry run: it reads,
 	// clusters and decides (model calls are made and metered), prints what
 	// it would post, and submits nothing and writes no state.
-	Post  bool
-	Hub   *hubkit.Client
-	Model *Model
-	Now   func() time.Time
-	Out   io.Writer
+	Post bool
+	// Preview is an unattended dry run that keeps its own state: it submits
+	// nothing and creates no channel, like a dry run, but it keeps stories,
+	// decisions and its simulated picks in <StateDir>/preview/state.json (so
+	// the daily budget and "already picked" carry from day to day, and no
+	// story is decided twice), and appends every decision and pick, with
+	// scores, to <StateDir>/preview/preview-YYYY-MM-DD.jsonl (UTC date). It
+	// never touches <StateDir>/state.json, so going live later starts from
+	// the hub's own log. Requires StateDir; refused with Post.
+	Preview bool
+	Hub     *hubkit.Client
+	Model   *Model
+	Now     func() time.Time
+	Out     io.Writer
 
 	// afterPost, when set (tests only), runs after each confirmed post and
 	// its state write. A panic there simulates a crash mid-run.
@@ -43,7 +52,13 @@ type TopicStats struct {
 	Post    int
 	Digest  int
 	Drop    int
-	Posted  int // submitted and confirmed (or, in a dry run, would post)
+	// Eligible: stories in the pick window, decided, not yet posted.
+	Eligible int
+	// Today: posted (or, in a preview, picked) earlier in this UTC day,
+	// counted from the state and the channel's log; Budget = top_k_per_day.
+	Today  int
+	Budget int
+	Posted int // submitted and confirmed (or, in a dry run, would post)
 }
 
 // Result is a run's outcome.
@@ -52,6 +67,8 @@ type Result struct {
 	NewStories int
 	Topics     []TopicStats
 	Errors     []string
+	// PreviewFile is the JSONL file a preview run appended to.
+	PreviewFile string
 }
 
 // ExitCode is 0 for a clean run, 1 if anything failed.
@@ -96,33 +113,44 @@ func Run(ctx context.Context, o RunOptions) *Result {
 	}
 	r := &runner{RunOptions: o, res: &Result{}, blocked: map[string]bool{}, tried: map[string]bool{}}
 	r.me = hubkit.KeyIDOf(o.Key)
-	r.logf("INFO", "editor %s key=%s hub=%s post=%v", Version, r.me, o.Config.HubURL, o.Post)
-	if r.dry() {
+	r.logf("INFO", "editor %s key=%s hub=%s post=%v preview=%v", Version, r.me, o.Config.HubURL, o.Post, o.Preview)
+	if o.Preview {
+		if o.Post {
+			r.fail("-preview and -post are exclusive")
+			return r.res
+		}
+		if o.StateDir == "" {
+			r.fail("-preview needs -state: it keeps its decisions and picks there")
+			return r.res
+		}
+		r.StateDir = PreviewDir(o.StateDir)
+		r.logf("PREVIEW", "nothing is submitted; decisions and picks are kept in %s", r.StateDir)
+	} else if r.dry() {
 		r.logf("DRY-RUN", "no -post: nothing is submitted and no state is written")
 	}
-	if o.Post {
+	if o.Post || o.Preview {
 		if o.StateDir == "" {
 			r.fail("-post needs -state: pending posts must be written ahead of their submit")
 			return r.res
 		}
-		if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
+		if err := os.MkdirAll(r.StateDir, 0o700); err != nil {
 			r.fail("state dir: %v", err)
 			return r.res
 		}
-		unlock, err := hubkit.Lock(StatePath(o.StateDir))
+		unlock, err := hubkit.Lock(StatePath(r.StateDir))
 		if err != nil {
 			if errors.Is(err, hubkit.ErrLocked) {
-				r.fail("another editor run holds %s.lock: posting nothing", StatePath(o.StateDir))
+				r.fail("another editor run holds %s.lock: posting nothing", StatePath(r.StateDir))
 			} else {
-				r.fail("cannot lock %s.lock (%v): posting nothing", StatePath(o.StateDir), err)
+				r.fail("cannot lock %s.lock (%v): posting nothing", StatePath(r.StateDir), err)
 			}
 			return r.res
 		}
 		defer unlock()
 	}
 	r.state = newState()
-	if o.StateDir != "" {
-		s, err := LoadState(o.StateDir)
+	if r.StateDir != "" {
+		s, err := LoadState(r.StateDir)
 		if err != nil {
 			r.fail("%v", err)
 			return r.res
@@ -170,13 +198,17 @@ func Run(ctx context.Context, o RunOptions) *Result {
 		}
 	}
 	for _, t := range r.res.Topics {
-		fmt.Fprintf(r.Out, "topic=%s decided=%d post=%d digest=%d drop=%d posted=%d\n", t.Slug, t.Decided, t.Post, t.Digest, t.Drop, t.Posted)
+		fmt.Fprintf(r.Out, "topic=%s decided=%d post=%d digest=%d drop=%d eligible=%d today=%d budget=%d posted=%d\n",
+			t.Slug, t.Decided, t.Post, t.Digest, t.Drop, t.Eligible, t.Today, t.Budget, t.Posted)
+	}
+	if r.Preview {
+		r.previewSummary()
 	}
 	return r.res
 }
 
 func (r *runner) saveState() bool {
-	if r.dry() || r.StateDir == "" {
+	if (r.dry() && !r.Preview) || r.StateDir == "" {
 		return true
 	}
 	if err := r.state.Save(r.StateDir); err != nil {
@@ -208,13 +240,26 @@ func (r *runner) runTopic(ctx context.Context, t *Topic, cutoff int64) {
 	if id != "" {
 		cs = r.state.Channels[id]
 		if cs == nil {
-			seen, err := r.rebuildSeen(ctx, id)
-			if err != nil {
-				r.fail("channel=%s could not read its log: %v", t.Slug, err)
-				return
-			}
-			cs = &ChannelState{Slug: t.Slug, Seen: seen}
+			cs = &ChannelState{Slug: t.Slug, Seen: map[string]int64{}}
 			r.state.Channels[id] = cs
+		}
+		// The log is read on every run, not only when the state is lost: what
+		// the channel already carries (and when) is counted from the state
+		// AND the log, so neither alone can under-count today's posts.
+		fromLog, err := r.rebuildSeen(ctx, id)
+		if err != nil {
+			r.fail("channel=%s could not read its log: %v", t.Slug, err)
+			return
+		}
+		mergeSeen(cs.Seen, fromLog)
+	} else if r.Preview {
+		// Preview of a channel not created yet: its simulated picks are kept
+		// under a key no hub channel id can take.
+		key := "preview:" + t.Slug
+		cs = r.state.Channels[key]
+		if cs == nil {
+			cs = &ChannelState{Slug: t.Slug, Seen: map[string]int64{}}
+			r.state.Channels[key] = cs
 		}
 	} else {
 		cs = &ChannelState{Slug: t.Slug, Seen: map[string]int64{}} // dry run, channel not yet created
@@ -271,24 +316,31 @@ func (r *runner) runTopic(ctx context.Context, t *Topic, cutoff int64) {
 		r.fail("channel=%s has a post the hub has not confirmed: posting nothing new to it this run", t.Slug)
 		return
 	}
-	for _, sid := range ids {
-		if ts.Posted >= t.MaxPerRun {
-			break
+	cands, ranked := r.candidates(t, cs)
+	ts.Eligible = len(cands)
+	ts.Today = PostedToday(cs, r.Now())
+	ts.Budget = r.Config.Decide.TopKPerDay
+	picks := RankPick(cands, min(ts.Budget-ts.Today, t.MaxPerRun), r.Config.Decide.MinPPost)
+	r.logf("INFO", "topic=%s eligible=%d posted_today=%d budget=%d min_p_post=%.3f picks=%d", t.Slug, len(cands), ts.Today, ts.Budget, r.Config.Decide.MinPPost, len(picks))
+	if r.Preview {
+		picked := map[string]bool{}
+		for _, p := range picks {
+			picked[p.Story] = true
 		}
+		r.previewWrite(t, cs, ranked, picked)
+	}
+	for _, p := range picks {
+		sid := p.Story
 		st := r.state.Stories[sid]
 		d := st.Decisions[t.Slug]
-		if d.labelOr("") != "post" {
-			continue
-		}
-		if _, ok := cs.Seen[sid]; ok {
-			continue
-		}
-		if _, ok := cs.Pending[sid]; ok {
-			continue
-		}
 		subject, body := FormatStory(st, d)
 		if r.dry() {
-			r.logf("DRY-RUN", "channel=%s would post %q", t.Slug, subject)
+			verb := "DRY-RUN"
+			if r.Preview {
+				verb = "PREVIEW"
+				cs.Seen[sid] = r.nowMS() // simulated: tomorrow's budget and eligibility see it
+			}
+			r.logf(verb, "channel=%s would post %q p_post=%.3f", t.Slug, subject, p.PPost)
 			for _, l := range strings.Split(body, "\n") {
 				fmt.Fprintf(r.Out, "  | %s\n", l)
 			}
@@ -330,6 +382,32 @@ func (r *runner) runTopic(ctx context.Context, t *Topic, cutoff int64) {
 			return
 		}
 	}
+}
+
+// candidates returns the topic's eligible stories (see pick.go) and every
+// decided story in the pick window, ranked (P(post) descending, id), for the
+// preview log.
+func (r *runner) candidates(t *Topic, cs *ChannelState) (eligible []Candidate, ranked []string) {
+	since := r.nowMS() - int64(r.Config.Decide.WindowHours)*3600_000
+	var all []Candidate
+	for sid, st := range r.state.Stories {
+		d := st.Decisions[t.Slug]
+		if d == nil || st.Created < since || !inTopic(t, st) {
+			continue
+		}
+		all = append(all, Candidate{Story: sid, PPost: d.Probs["post"]})
+		if _, ok := cs.Seen[sid]; ok {
+			continue
+		}
+		if _, ok := cs.Pending[sid]; ok {
+			continue
+		}
+		eligible = append(eligible, Candidate{Story: sid, PPost: d.Probs["post"]})
+	}
+	for _, c := range RankPick(all, len(all), 0) {
+		ranked = append(ranked, c.Story)
+	}
+	return eligible, ranked
 }
 
 func (d *StoryDecision) labelOr(def string) string {
@@ -460,7 +538,7 @@ func (r *runner) rebuildSeen(ctx context.Context, channelID string) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	r.logf("INFO", "rebuilt seen set for %s from its log: %d stories", channelID, len(seen))
+	r.logf("INFO", "read %s's log: %d posted stories", channelID, len(seen))
 	return seen, nil
 }
 

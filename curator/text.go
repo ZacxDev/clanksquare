@@ -165,7 +165,8 @@ func Truncate(s string, max int) string {
 }
 
 // NormalizeLink returns the dedupe form of a feed link: an absolute http(s)
-// URL with the scheme and host lowercased, the fragment dropped and every
+// URL with the scheme and host lowercased, twitter.com (and its www./mobile.
+// forms, and those of x.com) mapped to x.com, the fragment dropped and every
 // utm_* query parameter removed (the others keep their order). An arXiv paper
 // link (abs, pdf or html, any version) becomes https://arxiv.org/abs/<id>, see
 // arxivKey. It returns "" for anything that is not an absolute http(s) URL.
@@ -186,6 +187,9 @@ func NormalizeLink(raw string) string {
 	u.Host = strings.ToLower(u.Host)
 	if k := arxivKey(u); k != "" {
 		return k
+	}
+	if xHosts[u.Host] {
+		u.Host = "x.com"
 	}
 	u.Fragment, u.RawFragment = "", ""
 	if u.RawQuery != "" {
@@ -235,6 +239,12 @@ func arxivKey(u *url.URL) string {
 		return ""
 	}
 	return "https://arxiv.org/abs/" + m[1]
+}
+
+// xHosts are the hosts NormalizeLink maps to x.com: one post, one key.
+var xHosts = map[string]bool{
+	"twitter.com": true, "www.twitter.com": true, "mobile.twitter.com": true,
+	"www.x.com": true, "mobile.x.com": true,
 }
 
 // maxLink bounds a link (and a guid used in its place) in bytes.

@@ -16,7 +16,8 @@ import (
 // File format (JSON, version 1):
 //
 //	{"version":1,"channels":{"c_…":{"slug":"…","seen":{"<dedupe key>":<first-seen unix ms>},
-//	                                 "pending":{"<dedupe key>":"<signed token>"}}}}
+//	                                 "pending":{"<dedupe key>":"<signed token>"}}},
+//	 "discord_cursors":{"<discord channel id>":"<newest message id read>"}}
 //
 // Seen keys are never forgotten. A pending entry is a write-ahead record: it
 // is saved before its token is submitted and replaced by a seen key once the
@@ -26,6 +27,11 @@ import (
 type State struct {
 	Version  int                      `json:"version"`
 	Channels map[string]*ChannelState `json:"channels"`
+	// DiscordCursors holds, per Discord channel, the newest message id
+	// already read: the next run asks only for messages after it. Losing it
+	// is safe: the next read starts at max_age_hours ago and the seen set
+	// drops what was already posted.
+	DiscordCursors map[string]string `json:"discord_cursors,omitempty"`
 }
 
 // ChannelState is one channel's seen set, keyed by channel id so a slug that
@@ -36,7 +42,9 @@ type ChannelState struct {
 	Pending map[string]string `json:"pending,omitempty"`
 }
 
-func newState() *State { return &State{Version: 1, Channels: map[string]*ChannelState{}} }
+func newState() *State {
+	return &State{Version: 1, Channels: map[string]*ChannelState{}, DiscordCursors: map[string]string{}}
+}
 
 // LoadState reads a state file. A missing file returns (nil, nil): there is
 // nothing cached and every channel is rebuilt from its log. An unreadable or
@@ -58,6 +66,9 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.Channels == nil {
 		s.Channels = map[string]*ChannelState{}
+	}
+	if s.DiscordCursors == nil {
+		s.DiscordCursors = map[string]string{}
 	}
 	for id, cs := range s.Channels {
 		if cs == nil || cs.Seen == nil && len(cs.Pending) == 0 {
@@ -85,8 +96,8 @@ func (s *State) Save(path string) error {
 
 // rekey re-derives every key with the current NormalizeLink, so a key saved
 // by an older normalisation (an arXiv link with its version, before every
-// version mapped to https://arxiv.org/abs/<id>) still matches the key the same
-// item gets now. Keys that collapse into one keep the earliest first-seen
+// version mapped to https://arxiv.org/abs/<id>; twitter.com before it mapped
+// to x.com) still matches the key the same item gets now. Keys that collapse into one keep the earliest first-seen
 // time; pending entries that collapse keep the one whose old key sorts
 // first. Keys are keyFromLine outputs, and NormalizeLink only ever narrows
 // what it maps (never widens what it accepts), so a link key stays a link key
